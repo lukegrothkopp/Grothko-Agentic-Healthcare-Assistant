@@ -1,317 +1,142 @@
+from __future__ import annotations
 import os
-import json
+import streamlit as st
+import pandas as pd
 from datetime import datetime
 
-import streamlit as st
-from dotenv import load_dotenv
-import pandas as pd
-
-# ---------------------------------------------------------------------
-# Load env early & promote Streamlit secrets to os.environ
-# ---------------------------------------------------------------------
-load_dotenv()  # local dev via .env
-
-# Promote keys/paths so downstream libs using os.getenv(...) can see them
-if hasattr(st, "secrets"):
-    for key in ("OPENAI_API_KEY", "SERPAPI_API_KEY", "BING_API_KEY", "DB_PATH"):
-        if key in st.secrets:
-            os.environ[key] = str(st.secrets[key])
-
-# ---------------------------------------------------------------------
-# Safe to import modules that may read env at import time
-# ---------------------------------------------------------------------
-from core.db import (
-    init_db, seed_demo,
-    list_patients, list_doctors, list_appointments,
-    add_patient,
-)
-from core.logging import RunLogger
+from core import db
 from core.memory import MemoryStore
 from core.eval import eval_summary
+from core.logging import get_logger
+
 from agents.planner import Planner
 from agents.booking import BookingAgent
 from agents.history import HistoryAgent
 from agents.info_search import InfoSearchAgent
-from prompts import SUMMARY_PROMPT
 
-# ---------------------------------------------------------------------
-# Streamlit page config (do this early)
-# ---------------------------------------------------------------------
-st.set_page_config(page_title="Agentic Healthcare Assistant", layout="wide")
-st.title("🩺 Agentic Healthcare Assistant")
-st.caption(f"DB path: {os.getenv('DB_PATH', 'data/healthcare.db')}")
+st.set_page_config(page_title="Grothko Agentic Healthcare Assistant", layout="wide")
+log = get_logger("App")
 
-# ---------------------------------------------------------------------
-# Ensure DB exists before any queries (also resilient to server restarts)
-# ---------------------------------------------------------------------
-@st.cache_resource
-def _ensure_db_once() -> bool:
-    init_db()
-    try:
-        # Seed is idempotent if seed_demo uses a meta flag; safe in demos
-        seed_demo()
-    except Exception:
-        pass
-    return True
-
-_ = _ensure_db_once()
-
-# ---------------------------------------------------------------------
-# Sidebar: Admin
-# ---------------------------------------------------------------------
-with st.sidebar:
-    st.header("Admin / Setup")
-    if st.button("Reinitialize Database (demo)"):
-        # Explicit re-init/seed for demo purposes
-        init_db()
-        try:
-            seed_demo()
-            st.success("Database initialized with demo data.")
-        except Exception as e:
-            st.warning(f"Init ok; seeding skipped: {e}")
-    st.divider()
-    st.subheader("Environment")
-    st.caption("Set keys in Streamlit **Secrets** or a local `.env`:\n"
-               "- OPENAI_API_KEY\n- SERPAPI_API_KEY (or BING_API_KEY)\n- DB_PATH (optional)")
-
-# ---------------------------------------------------------------------
-# Singletons in session (logger, memory, agents)
-# ---------------------------------------------------------------------
-if "logger" not in st.session_state:
-    st.session_state.logger = RunLogger()
+# Initialize subsystems
 if "memory" not in st.session_state:
     st.session_state.memory = MemoryStore()
-if "planner" not in st.session_state:
-    st.session_state.planner = Planner()
-if "history_agent" not in st.session_state:
-    st.session_state.history_agent = HistoryAgent()
-if "booking_agent" not in st.session_state:
-    st.session_state.booking_agent = BookingAgent()
-if "info_agent" not in st.session_state:
-    st.session_state.info_agent = InfoSearchAgent(st.session_state.memory)
 
-logger: RunLogger = st.session_state.logger
-memory: MemoryStore = st.session_state.memory
-planner: Planner = st.session_state.planner
-history_agent: HistoryAgent = st.session_state.history_agent
-booking_agent: BookingAgent = st.session_state.booking_agent
-info_agent: InfoSearchAgent = st.session_state.info_agent
+db.init_db(seed=True)
+planner = Planner()
+booking = BookingAgent()
+history = HistoryAgent()
+info = InfoSearchAgent()
 
-# ---------------------------------------------------------------------
-# Load initial data AFTER DB is ensured
-# ---------------------------------------------------------------------
-try:
-    patients = list_patients()
-    doctors = list_doctors()
-    appointments = list_appointments()
-except Exception as e:
-    st.error("Database not ready. Click **Reinitialize Database (demo)** in the sidebar.")
-    st.stop()
+st.title("🩺 Grothko Agentic Healthcare Assistant")
+st.caption("Demo — not medical advice. For admin workflows & high level info only.")
 
-# ---------------------------------------------------------------------
+with st.sidebar:
+    st.header("Quick Actions")
+    seed = st.button("Seed demo data")
+    if seed:
+        db.init_db(seed=True)
+        st.toast("Database seeded.")
+    st.markdown("---")
+    st.subheader("Memory")
+    q = st.text_input("Search memory")
+    if st.button("Search") and q:
+        hits = st.session_state.memory.search(q)
+        for h in hits:
+            st.write("•", h.text)
+
 # Tabs
-# ---------------------------------------------------------------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["Patient & Doctor Views", "Agent Playground", "Medical Info Search", "Memory & Logs", "Evaluation"]
-)
+main, booking_tab, hist_tab, info_tab, eval_tab = st.tabs([
+    "Plan", "Book Appointment", "Patient History", "Medical Info Search", "Eval & Logs",
+])
 
-# =========================
-# Tab 1: Patient & Doctor Views
-# =========================
-with tab1:
-    st.subheader("Patients")
-    st.dataframe(pd.DataFrame(patients))
+with main:
+    st.subheader("Planner")
+    user_q = st.text_input("What do you need?", placeholder="e.g., 'Book a nephrologist for my father and summarize latest CKD treatments.'")
+    if st.button("Make plan") and user_q:
+        steps = planner.plan(user_q)
+        st.json(steps)
+        st.session_state.memory.add(f"Plan for: {user_q}", type="plan", steps=steps)
 
-    with st.expander("Add a patient"):
-        col1, col2, col3, col4 = st.columns(4)
-        name = col1.text_input("Name")
-        age = col2.number_input("Age", 0, 120, 40)
-        sex = col3.selectbox("Sex", ["M", "F", "Other"])
-        contact = col4.text_input("Contact (email/phone)")
-        if st.button("Save Patient"):
-            if name:
-                try:
-                    pid = add_patient(name, int(age), sex, contact)
-                    st.success(f"Added patient #{pid}")
-                except Exception as e:
-                    st.error(f"Failed to add patient: {e}")
-            else:
-                st.error("Name required")
+with booking_tab:
+    st.subheader("Find a doctor & book")
+    patients = db.list_patients()
+    patient_map = {f"{p['name']} (#{p['id']})": int(p["id"]) for p in patients}
+    sel_patient = st.selectbox("Patient", list(patient_map.keys()))
+    pid = patient_map[sel_patient]
 
-    st.divider()
-    st.subheader("Doctors")
-    st.dataframe(pd.DataFrame(doctors))
+    col1, col2 = st.columns(2)
+    with col1:
+        spec = st.text_input("Specialty", value="Nephrology")
+        loc = st.text_input("Location contains", value="Seattle")
+        if st.button("Search doctors"):
+            docs = booking.search_doctors(spec, loc)
+            st.session_state.docs = docs
+    with col2:
+        docs = st.session_state.get("docs", [])
+        if docs:
+            df = pd.DataFrame([{k: d[k] for k in d.keys()} for d in docs])
+            st.dataframe(df)
 
-    st.divider()
-    st.subheader("Appointments")
-    st.dataframe(pd.DataFrame(appointments))
+    if docs := st.session_state.get("docs"):
+        doc_names = {f"{d['name']} — {d['specialty']} ({d['location']})": int(d["id"]) for d in docs}
+        pick = st.selectbox("Choose doctor", list(doc_names.keys()))
+        doc_id = doc_names[pick]
+        if st.button("Load slots"):
+            st.session_state.slots = booking.get_slots(doc_id)
 
-# =========================
-# Tab 2: Agent Playground
-# =========================
-with tab2:
-    st.subheader("Plan & Execute")
-    st.caption(
-        "Try multi-step queries like: "
-        "“My 70-year-old father has chronic kidney disease. Book a nephrologist and summarize latest treatment methods.”"
-    )
+    slots = st.session_state.get("slots", [])
+    if slots:
+        slot_strs = [f"{s} → {e}" for s, e in slots[:30]]
+        chosen = st.selectbox("Available slots", slot_strs)
+        if st.button("Book this slot"):
+            start_ts, end_ts = chosen.split(" → ")
+            appt_id = booking.book(pid, doc_id, start_ts, end_ts)
+            st.success(f"Booked appointment #{appt_id}")
+            st.session_state.memory.add(
+                f"Booked appt {appt_id} for patient {pid} with doctor {doc_id} at {start_ts}",
+                type="booking",
+            )
 
-    user_query = st.text_area(
-        "User input",
-        height=100,
-        value=(
-            "My 70-year-old father has chronic kidney disease. "
-            "I want to book a nephrologist for him next Tuesday at 10am. "
-            "Also, can you summarize latest treatment methods?"
-        ),
-    )
+    st.markdown("### Appointments")
+    appts = booking.list_appointments(pid)
+    if appts:
+        st.dataframe(pd.DataFrame([{k: a[k] for k in a.keys()} for a in appts]))
 
-    # Build selection safely even if empty
-    patient_opts = [(p.get("id"), p.get("name", f"Patient {p.get('id')}")) for p in patients]
-    selected_patient = st.selectbox(
-        "Which patient is this about?",
-        options=patient_opts if patient_opts else [(-1, "No patients found")],
-        format_func=lambda x: f"#{x[0]} {x[1]}",
-        index=0,
-    )
+with hist_tab:
+    st.subheader("Patient history")
+    patients = db.list_patients()
+    patient_map = {f"{p['name']} (#{p['id']})": int(p["id"]) for p in patients}
+    sel_patient = st.selectbox("Patient", list(patient_map.keys()), key="hist_patient")
+    pid = patient_map[sel_patient]
 
-    specialty = st.text_input("Desired specialty (e.g., Nephrology)", value="Nephrology")
-    preferred_time = st.text_input("Preferred time (ISO, e.g., 2025-10-15T10:00)", value="")
+    st.text_area("New entry", key="hist_text")
+    if st.button("Add entry") and st.session_state.get("hist_text"):
+        hid = history.add(pid, st.session_state["hist_text"], tags="manual")
+        st.success(f"Added history #{hid}")
+        st.session_state.memory.add(st.session_state["hist_text"], type="history", patient_id=pid)
 
-    if st.button("Plan & Run"):
-        logger.log("input", f"User: {user_query}")
+    rows = history.get(pid)
+    if rows:
+        st.dataframe(pd.DataFrame([{k: r[k] for k in r.keys()} for r in rows]))
 
-        # Plan steps
-        try:
-            plan = planner.plan(user_query)
-            st.json([s.model_dump() for s in plan])
-            logger.log("plan", f"Steps: {[s.action for s in plan]}")
-        except Exception as e:
-            st.error(f"Planning failed: {e}")
-            st.stop()
+with info_tab:
+    st.subheader("Medical information search (high level)")
+    q = st.text_input("Query", value="chronic kidney disease latest treatments")
+    if st.button("Search info"):
+        out = info.query(q)
+        st.write("**Top sources (filtered for WHO/CDC/NIH/Medline/Mayo):**")
+        st.json(out["sources"])
+        st.markdown("**Extractive bullets:**")
+        for b in out["bullets"]:
+            st.write(b)
+        st.session_state.memory.add("\n".join(out["bullets"]), type="info", query=q)
 
-        pid = selected_patient[0] if selected_patient and selected_patient[0] != -1 else None
-        summary_chunks = []
-        search_docs = []
+with eval_tab:
+    st.subheader("Evaluation & Logs")
+    memo = st.text_area("Paste a response to score", value="")
+    if st.button("Score it") and memo:
+        st.json(eval_summary(memo))
 
-        for step in plan:
-            try:
-                if step.action == "identify_patient":
-                    logger.log("identify_patient", f"Selected patient_id={pid}")
-                elif step.action == "retrieve_history":
-                    hist = history_agent.retrieve(pid) if pid else []
-                    logger.log("retrieve_history", f"Retrieved {len(hist)} entries", meta={"count": len(hist)})
-                    if hist:
-                        text = "\n".join([str(h.get("note", "")) for h in hist])
-                        memory.add([text], [{"type": "history", "patient_id": pid}])
-                        summary_chunks.append(text)
-                elif step.action == "book_appointment":
-                    res = booking_agent.book(pid, specialty, preferred_time or None)
-                    ok = bool(res.get("success"))
-                    logger.log("book_appointment", json.dumps(res), success=ok, meta=res)
-                elif step.action == "medical_info_search":
-                    docs = info_agent.search(user_query, k=5)
-                    logger.log("medical_info_search", f"{len(docs)} docs")
-                    search_docs = docs
-                    combined = "\n\n".join([f"{d['title']}\n{d.get('snippet','')}" for d in docs])
-                    memory.add([combined], [{"type": "medical_info", "query": user_query}])
-                    summary_chunks.append(combined)
-                elif step.action == "summarize":
-                    full_context = "\n\n".join(summary_chunks) if summary_chunks else "No prior history or info found."
-                    try:
-                        from openai import OpenAI
-                        api = os.getenv("OPENAI_API_KEY")
-                        if api:
-                            client = OpenAI(api_key=api)
-                            prompt = f"{SUMMARY_PROMPT}\n\nContext:\n{full_context}"
-                            chat = client.chat.completions.create(
-                                model="gpt-4o-mini",
-                                messages=[
-                                    {"role": "system", "content": "You are a helpful healthcare assistant (no medical advice)."},
-                                    {"role": "user", "content": prompt},
-                                ],
-                                temperature=0.2,
-                            )
-                            summary = chat.choices[0].message.content
-                        else:
-                            summary = (
-                                "Summary (demo):\n"
-                                "- Patient Context: CKD with ACE inhibitor. Monitor eGFR.\n"
-                                "- Latest Options: RAAS control, SGLT2 inhibitors, lifestyle; consult nephrology."
-                            )
-                    except Exception:
-                        summary = f"(LLM unavailable) Heuristic summary:\n{full_context[:1000]}"
-                    logger.log("summarize", "Generated summary.")
-                    st.markdown("#### Assistant Summary")
-                    st.write(summary)
-                    st.session_state["last_summary"] = summary
-                    if search_docs:
-                        st.markdown("#### Sources")
-                        for d in search_docs:
-                            title = d.get("title") or d.get("url")
-                            url = d.get("url", "")
-                            snippet = d.get("snippet", "")
-                            st.write(f"- [{title}]({url}) — {snippet}")
-            except Exception as e:
-                logger.log("error", f"{step.action} failed: {e}", success=False, meta={"error": str(e)})
-                st.warning(f"Step '{step.action}' encountered an issue: {e}")
-
-# =========================
-# Tab 3: Medical Info Search
-# =========================
-with tab3:
-    st.subheader("Trusted Medical Info Search")
-    query = st.text_input("Query", value="latest CKD treatment options 2025")
-    if st.button("Search"):
-        try:
-            docs = info_agent.search(query, k=5)
-            st.write("Results:")
-            for d in docs:
-                title = d.get("title") or d.get("url")
-                url = d.get("url", "")
-                snippet = d.get("snippet", "")
-                st.write(f"- [{title}]({url}) — {snippet}")
-        except Exception as e:
-            st.error(f"Search failed: {e}")
-
-# =========================
-# Tab 4: Memory & Logs
-# =========================
-with tab4:
-    st.subheader("Vector Memory Lookup")
-    q = st.text_input("Search memory", value="kidney disease")
-    if st.button("Search memory"):
-        try:
-            hits = memory.search(q, k=5)
-            for h in hits:
-                doc = h.get("document", "")
-                st.code(doc[:500] + ("..." if len(doc) > 500 else ""))
-                st.json(h.get("metadata", {}))
-        except Exception as e:
-            st.error(f"Memory search failed: {e}")
-
-    st.divider()
-    st.subheader("Agent Run Logs")
-    try:
-        st.dataframe(pd.DataFrame(logger.to_dicts()))
-    except Exception as e:
-        st.error(f"Unable to render logs: {e}")
-
-# =========================
-# Tab 5: Evaluation
-# =========================
-with tab5:
-    st.subheader("Heuristic Evaluation")
-    last = st.session_state.get("last_summary", "")
-    st.text_area("Generated summary (read-only)", last, height=160, disabled=True)
-    expected = st.text_input("Expected keywords (comma-separated)", value="CKD,eGFR,ACE,SGLT2,appointment,nephrologist")
-    if st.button("Evaluate"):
-        try:
-            hints = {"ckd": [k.strip() for k in expected.split(",") if k.strip()]}
-            scores = eval_summary(last, hints)
-            st.json(scores)
-        except Exception as e:
-            st.error(f"Evaluation failed: {e}")
-
-st.caption("Demo app for educational purposes only. Not medical advice.")
-
+    st.markdown("### Memory dump")
+    for it in st.session_state.memory.dump()[-20:]:
+        st.write(f"• {it.text}")
