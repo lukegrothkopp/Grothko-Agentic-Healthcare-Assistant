@@ -30,7 +30,6 @@ def update_patient_record(patient_id: str, data: Dict[str, Any]) -> bool:
     if patient_id not in db:
         db[patient_id] = data
     else:
-        # shallow merge
         db[patient_id].update(data)
     _save_db(db)
     return True
