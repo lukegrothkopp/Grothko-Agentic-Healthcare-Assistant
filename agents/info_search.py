@@ -1,37 +1,52 @@
 from __future__ import annotations
-from typing import Dict, Any, List
 import os, requests
-
-from core.memory import MemoryStore
+from typing import Dict, Any, List
 
 class InfoSearchAgent:
-    """
-    Searches trusted medical info using Bing Web Search (optional) and stores results in vector memory.
-    """
-    def __init__(self, memory: MemoryStore):
+    def __init__(self, memory):
         self.memory = memory
-        self.bing_key = os.getenv("BING_API_KEY")
-        self.BING_URL = "https://api.bing.microsoft.com/v7.0/search"
+        self.serp_key = os.getenv("SERPAPI_API_KEY")
 
     def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        docs = []
-        if self.bing_key:
-            headers = {"Ocp-Apim-Subscription-Key": self.bing_key}
-            params = {"q": query + " site:who.int OR site:nih.gov OR site:medlineplus.gov", "count": k}
-            resp = requests.get(self.BING_URL, headers=headers, params=params, timeout=15)
-            resp.raise_for_status()
-            js = resp.json()
-            for it in js.get("webPages", {}).get("value", []):
-                docs.append({"title": it.get("name"), "url": it.get("url"), "snippet": it.get("snippet")})
-        else:
-            # Fallback demo content
-            docs = [
-                {"title": "CKD overview (demo)", "url": "https://medlineplus.gov/kidneydiseases.html",
-                 "snippet": "Chronic kidney disease involves gradual loss of kidney function. Management includes BP control, RAAS inhibitors, lifestyle changes."}
-            ]
-        # push to memory
-        texts = [f"{d['title']}\n{d['snippet']}\n{d['url']}" for d in docs]
-        metas = [{"source": d["url"], "type": "medical_info"} for d in docs]
-        if texts:
+        docs: List[Dict[str, Any]] = []
+        try:
+            if self.serp_key:
+                r = requests.get(
+                    "https://serpapi.com/search.json",
+                    params={"engine": "google", "q": query, "num": k, "api_key": self.serp_key},
+                    timeout=15,
+                )
+                r.raise_for_status()
+                js = r.json()
+                for it in js.get("organic_results", [])[:k]:
+                    docs.append({
+                        "title": it.get("title"),
+                        "url": it.get("link"),
+                        "snippet": it.get("snippet")
+                    })
+            elif self.bing_key:
+                headers = {"Ocp-Apim-Subscription-Key": self.bing_key}
+                r = requests.get(self.BING_URL, params={"q": query, "count": k}, headers=headers, timeout=15)
+                r.raise_for_status()
+                js = r.json()
+                for it in js.get("webPages", {}).get("value", []):
+                    docs.append({
+                        "title": it.get("name"),
+                        "url": it.get("url"),
+                        "snippet": it.get("snippet")
+                    })
+            else:
+                docs = [{
+                    "title": "CKD overview (demo)",
+                    "url": "https://medlineplus.gov/kidneydiseases.html",
+                    "snippet": "Chronic kidney disease overview and treatment basics."
+                }]
+        except Exception:
+            pass
+
+        # Store results in vector memory
+        if docs:
+            texts = [f"{d['title']}\n{d['snippet']}\n{d['url']}" for d in docs]
+            metas = [{"source": d["url"], "type": "medical_info"} for d in docs]
             self.memory.add(texts, metas)
         return docs
