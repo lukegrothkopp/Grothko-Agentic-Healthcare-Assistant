@@ -1,52 +1,51 @@
 from __future__ import annotations
-import os, requests
-from typing import Dict, Any, List
+import os
+import re
+import requests
+from duckduckgo_search import DDGS
+from typing import List, Dict
+from core.logging import get_logger
+
+log = get_logger("InfoSearchAgent")
+
+TRUSTED = ["who.int", "medlineplus.gov", "cdc.gov", "nih.gov", "mayoclinic.org"]
 
 class InfoSearchAgent:
-    def __init__(self, memory):
-        self.memory = memory
-        self.serp_key = os.getenv("SERPAPI_API_KEY")
+    def _search(self, query: str, max_results: int = 5) -> List[Dict]:
+        """Use DuckDuckGo to find reputable sources; filter for TRUSTED domains."""
+        hits = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=max_results*3):
+                url = r.get("href") or r.get("link") or ""
+                if any(dom in url for dom in TRUSTED):
+                    hits.append({"title": r.get("title"), "snippet": r.get("body"), "url": url})
+                if len(hits) >= max_results:
+                    break
+        return hits
 
-    def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
-        docs: List[Dict[str, Any]] = []
+    def _fetch(self, url: str, timeout: int = 10) -> str:
         try:
-            if self.serp_key:
-                r = requests.get(
-                    "https://serpapi.com/search.json",
-                    params={"engine": "google", "q": query, "num": k, "api_key": self.serp_key},
-                    timeout=15,
-                )
-                r.raise_for_status()
-                js = r.json()
-                for it in js.get("organic_results", [])[:k]:
-                    docs.append({
-                        "title": it.get("title"),
-                        "url": it.get("link"),
-                        "snippet": it.get("snippet")
-                    })
-            elif self.bing_key:
-                headers = {"Ocp-Apim-Subscription-Key": self.bing_key}
-                r = requests.get(self.BING_URL, params={"q": query, "count": k}, headers=headers, timeout=15)
-                r.raise_for_status()
-                js = r.json()
-                for it in js.get("webPages", {}).get("value", []):
-                    docs.append({
-                        "title": it.get("name"),
-                        "url": it.get("url"),
-                        "snippet": it.get("snippet")
-                    })
-            else:
-                docs = [{
-                    "title": "CKD overview (demo)",
-                    "url": "https://medlineplus.gov/kidneydiseases.html",
-                    "snippet": "Chronic kidney disease overview and treatment basics."
-                }]
-        except Exception:
-            pass
+            html = requests.get(url, timeout=timeout).text
+        except Exception as e:
+            log.warning(f"Fetch failed: {e}")
+            return ""
+        # crude text extraction
+        text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.S)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()[:12000]
 
-        # Store results in vector memory
-        if docs:
-            texts = [f"{d['title']}\n{d['snippet']}\n{d['url']}" for d in docs]
-            metas = [{"source": d["url"], "type": "medical_info"} for d in docs]
-            self.memory.add(texts, metas)
-        return docs
+    def query(self, q: str) -> Dict:
+        results = self._search(q)
+        pages = []
+        for r in results:
+            body = self._fetch(r["url"])[:4000]
+            pages.append({"title": r["title"], "url": r["url"], "snippet": r.get("snippet"), "body": body})
+        bullets = []
+        for p in pages[:3]:
+            # naive extractive summary: first 2 sentences containing the query term
+            sents = re.split(r"(?<=[.!?])\s+", p["body"])[:50]
+            picks = [s for s in sents if any(w in s.lower() for w in q.lower().split())][:2]
+            if picks:
+                bullets.append(f"- {p['title']} ({p['url'].split('/')[2]}): " + " ".join(picks)[:300])
+        return {"query": q, "sources": results, "bullets": bullets}
