@@ -1,12 +1,9 @@
-
 import datetime, json, re
 from datetime import date, timedelta
 from langchain.tools import Tool
+from utils.database_ops import add_appointment
 
 DATE_PAT = re.compile(r"(20\d{2}-\d{2}-\d{2})|((?:\d{1,2})/(?:\d{1,2})/(?:20\d{2}))", re.I)
-
-from datetime import date, timedelta
-import re
 
 WEEKDAYS = {
     "monday": 0, "tuesday": 1, "wednesday": 2,
@@ -98,6 +95,15 @@ def book_appointment(input_str: str) -> str:
             return ("The booking input could not be parsed. Include a patient_id "
                     "(e.g., 'patient_001') or provide JSON with patient_id, doctor_name, appointment_date.")
         booking_id = f"booking_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+        appt = {
+            "date": d_iso,
+            "doctor": doc,
+            "status": "scheduled",
+            "booking_id": booking_id,
+            "created_at": datetime.datetime.now().isoformat(timespec="seconds")
+        }
+        add_appointment(pid, appt)
+
         return (f"Appointment for patient {pid} with Dr. {doc} on {d_iso} booked. "
                 f"Booking ID: {booking_id}.")
     except Exception as e:
