@@ -89,10 +89,13 @@ def _extract_doctor(text: str) -> str | None:
     m = re.search(r"Dr\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", text or "")
     if m:
         return m.group(1)
-    if "hypertension" in (text or "").lower():
+    t = (text or "").lower()
+    if "hypertension" in t:
         return "Hypertension Specialist (Cardiologist)"
-    if "kidney" in (text or "").lower() or "nephro" in (text or "").lower():
+    if "kidney" in t or "nephro" in t:
         return "Nephrologist"
+    if "foot" in t or "ankle" in t:
+        return "Podiatrist"
     return None
 
 def _make_booking_payload(user_text: str, fallback_pid: Optional[str]) -> str:
