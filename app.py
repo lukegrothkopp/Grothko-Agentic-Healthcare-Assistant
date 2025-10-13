@@ -10,7 +10,7 @@ for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN", "C
     if k in st.secrets and st.secrets[k]:
         os.environ[k] = str(st.secrets[k]).strip()
 
-st.set_page_config(page_title="Grothko Agentic Healthcare Assistant", layout="wide")
+st.set_page_config(page_title="Grothko Agentic Healthcare Assistant", page_icon=str(FAVICON) if FAVICON.exists() else "🥼" layout="wide")
 st.title("🩺 Grothko Agentic Healthcare Assistant")
 
 st.markdown("""
