@@ -57,17 +57,16 @@ probe_q = st.text_input(
 if st.button("Retrieve top-3", key="kb_probe_btn"):
     try:
         rag = RAGPipeline()
-        st.caption(
-            f"Backend in use: {getattr(rag, 'backend', 'unknown')} "
-            "(FAISS if OpenAI key + index present; TF-IDF otherwise)"
-        )
+        backend = getattr(rag, "backend", "unknown")
+        is_faiss = backend == "openai"  # our RAG uses 'openai' when FAISS+embeddings is active
+
         pairs = rag.retrieve(probe_q, k=3)
-        if not pairs:
-            st.info("No results from KB.")
-        else:
-            for i, (text, score) in enumerate(pairs, 1):
-                st.write(f"**{i}.** score={score:.4f}")
-                st.write(text[:1000] + ("…" if len(text) > 1000 else ""))
+        label = "distance (lower=better)" if is_faiss else "similarity (higher=better)"
+        st.caption(f"Backend in use: {backend} — showing {label}")
+
+        for i, (text, score) in enumerate(pairs, 1):
+            st.write(f"**{i}.** {label.split()[0]}={score:.4f}")
+            st.write(text[:1000] + ("…" if len(text) > 1000 else ""))
     except Exception as e:
         st.error(f"Probe failed: {e}")
 
