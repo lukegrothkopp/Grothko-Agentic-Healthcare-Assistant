@@ -1,5 +1,4 @@
-import os
-import glob
+import os, glob
 import numpy as np
 import faiss
 from typing import List, Tuple
@@ -18,7 +17,6 @@ class RAGPipeline:
         if os.path.exists(self.index_path) and os.path.getsize(self.index_path) > 0:
             try:
                 self.index = faiss.read_index(self.index_path)
-                # Load docs alongside index
                 docs_path = self.index_path + ".docs.txt"
                 if os.path.exists(docs_path):
                     with open(docs_path, "r", encoding="utf-8") as f:
@@ -29,7 +27,6 @@ class RAGPipeline:
         self._build_from_kb()
 
     def _build_from_kb(self):
-        # Ingest all .txt files from KB
         texts: List[str] = []
         for fp in glob.glob(os.path.join(self.kb_dir, "*.txt")):
             with open(fp, "r", encoding="utf-8") as f:
@@ -40,7 +37,6 @@ class RAGPipeline:
             self.index = None
             self.docs = []
             return
-        # Embed full docs (simple for demo; chunking optional)
         vecs = self.embeddings.embed_documents(texts)
         mat = np.array(vecs, dtype=np.float32)
         dim = mat.shape[1]
