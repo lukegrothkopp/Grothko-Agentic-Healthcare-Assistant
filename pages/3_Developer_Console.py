@@ -5,8 +5,7 @@ from generate_faiss_index import generate_index
 
 load_dotenv()
 
-
-
+# Map secrets -> env
 for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
     if k in st.secrets and st.secrets[k]:
         os.environ[k] = str(st.secrets[k]).strip()
@@ -26,7 +25,7 @@ st.caption("For ops, QA, indexing, and diagnostics. Not visible to patients/clin
 # ---- RAG index builder ----
 st.subheader("RAG Index")
 if st.button("Build FAISS index now"):
-    key = os.environ.get("OPENAI_API_KEY","").strip()
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not key.startswith("sk-"):
         st.warning("No valid OPENAI_API_KEY found; the app will use TF-IDF fallback.")
     else:
@@ -36,8 +35,6 @@ if st.button("Build FAISS index now"):
                 st.success(f"FAISS index built at {out_path}")
             except Exception as e:
                 st.error(f"Failed to build: {e}")
-    else:
-        st.warning("No valid OPENAI_API_KEY found; the app will use TF-IDF fallback.")
 
 # ---- QA Eval (QAEvalChain) ----
 st.markdown("---")
