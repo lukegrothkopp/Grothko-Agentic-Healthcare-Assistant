@@ -16,31 +16,11 @@ st.caption("Demo — not medical advice. Provides high-level info and admin logi
 # Build the agent graph once
 graph = build_graph(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 
-# Patient context
+# Sidebar: just patient context
 with st.sidebar:
     st.header("Your Info")
     patient_id = st.text_input("Patient ID", "patient_001")
     st.caption("Tip: You can use natural phrases like 'book a cardiologist next Monday'.")
-
-    st.markdown("---")
-    st.subheader("Book an appointment")
-    appt_text = st.text_input(
-        "Describe the appointment",
-        value="Book a hypertension follow-up next Monday"
-    )
-    if st.button("Book"):
-        with st.spinner("Booking…"):
-            try:
-                state = {
-                "messages": [HumanMessage(content=appt_text)],
-                "intent": None,
-                "result": None,
-                "patient_id": pid
-                }
-                result = graph.invoke(state)
-                st.success(result["messages"][-1].content)
-            except Exception as e:
-                st.error(f"Failed: {e}")
 
 # Chat UI (patient only)
 if "messages" not in st.session_state:
@@ -61,7 +41,7 @@ if prompt := st.chat_input("How can I help you today?"):
                     "messages": [HumanMessage(content=prompt)],
                     "intent": None,
                     "result": None,
-                    "patient_id": patient_id
+                    "patient_id": patient_id,  # <-- use sidebar value
                 }
                 result_state = graph.invoke(state)
                 answer = result_state["messages"][-1].content
@@ -70,3 +50,24 @@ if prompt := st.chat_input("How can I help you today?"):
             st.markdown(answer)
     st.session_state.messages.append({"role": "assistant", "content": answer})
 
+# --- Patient-side quick booking (main page section) ---
+st.markdown("---")
+st.subheader("Book an appointment (natural language)")
+nl_booking = st.text_input(
+    "Describe the appointment",
+    value="Book a hypertension follow-up next Monday",
+    key="patient_booking_text",
+)
+if st.button("Book appointment", key="patient_book_btn"):
+    with st.spinner("Booking…"):
+        try:
+            state = {
+                "messages": [HumanMessage(content=nl_booking)],
+                "intent": None,
+                "result": None,
+                "patient_id": patient_id,   # <-- correct variable
+            }
+            result_state = graph.invoke(state)
+            st.success(result_state["messages"][-1].content)
+        except Exception as e:
+            st.error(f"Failed: {e}")
