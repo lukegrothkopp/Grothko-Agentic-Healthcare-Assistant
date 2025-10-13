@@ -12,14 +12,13 @@ st.caption("Not medical advice. High-level info & logistics only.")
 
 graph = build_graph(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 
-# Sidebar
 with st.sidebar:
     st.header("Context")
+    patient_id = st.text_input("Patient ID", "patient_001")
     st.info("The agent routes: booking / records / search / RAG. Offline Mini-KB ensures results even if web is blocked.")
     st.markdown("---")
     st.caption("Set OPENAI_API_KEY in .env for LLM polishing.")
 
-# Chat
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -31,11 +30,10 @@ if prompt := st.chat_input("Ask about logistics or high-level info…"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
-
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
             try:
-                state = {"messages": [HumanMessage(content=prompt)], "intent": None, "result": None}
+                state = {"messages": [HumanMessage(content=prompt)], "intent": None, "result": None, "patient_id": patient_id}
                 result_state = graph.invoke(state)
                 answer = result_state["messages"][-1].content
             except Exception as e:
@@ -46,4 +44,3 @@ if prompt := st.chat_input("Ask about logistics or high-level info…"):
 st.sidebar.markdown("---")
 st.sidebar.header("LLMOps (placeholder)")
 st.sidebar.write("Add traces, token usage, and evals here.")
-
