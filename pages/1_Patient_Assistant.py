@@ -52,7 +52,7 @@ if prompt := st.chat_input("How can I help you today?"):
 
 # --- Patient-side quick booking (main page section) ---
 st.markdown("---")
-st.subheader("Book an appointment (natural language)")
+st.subheader("Book an appointment")
 nl_booking = st.text_input(
     "Describe the appointment",
     value="Book a hypertension follow-up next Monday",
