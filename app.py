@@ -123,22 +123,37 @@ with hist_tab:
 with info_tab:
     st.subheader("Medical information search (high level)")
     q = st.text_input("Query", value="chronic kidney disease latest treatments")
-    use_llm = st.checkbox("Use LLM summarization (requires OPENAI_API_KEY)", value=True)
+
+    # Detect if LLM is available (key in env) and show a toggle
+    llm_available = bool(os.getenv("OPENAI_API_KEY"))
+    use_llm = st.checkbox(
+        "Use LLM summarization (requires OPENAI_API_KEY)",
+        value=llm_available,
+        disabled=not llm_available,
+        help="If no key is set, this toggle is disabled."
+    )
 
     if st.button("Search info"):
-        out = info.query(q, use_llm=use_llm)
+        # Call the new signature if available; otherwise gracefully fall back
+        try:
+            out = info.query(q, use_llm=use_llm)
+        except TypeError:
+            # Older InfoSearchAgent without the keyword argument
+            out = info.query(q)
         st.session_state.last_info_out = out
 
     out = st.session_state.get("last_info_out")
     if out:
-        st.write("**Top sources (filtered / trusted-first):**")
+        st.write("**Top sources (trusted-first):**")
         st.json(out.get("sources", []))
         st.markdown("**Bullets:**")
         bullets = out.get("bullets") or []
         if bullets:
             for b in bullets:
                 st.write(b)
-            st.caption(f"LLM summarization used: {out.get('used_llm', False)}")
+            # Show whether LLM was actually used
+            used_llm = out.get("used_llm", False)
+            st.caption(f"LLM summarization used: {used_llm}")
             st.session_state.memory.add("\n".join(bullets), type="info", query=q)
         else:
             st.info("No concise snippets found. Try refining the query.")
