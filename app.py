@@ -7,8 +7,9 @@ load_dotenv()
 
 # Map secrets => env (works on Streamlit Cloud)
 for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN", "CLINICIAN_TOKEN"):
-    if k in st.secrets and st.secrets[k]:
-        os.environ[k] = str(st.secrets[k]).strip()
+    v = st.secrets.get(k) if hasattr(st, "secrets") else None
+    if v:
+        os.environ[k] = str(v).strip()
 
 st.set_page_config(page_title="Grothko Agentic Healthcare Assistant", page_icon="🥼", layout="wide")
 st.title("🩺 Grothko Agentic Healthcare Assistant")
