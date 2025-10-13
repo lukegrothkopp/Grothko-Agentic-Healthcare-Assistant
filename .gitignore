@@ -1,6 +1,6 @@
 __pycache__/
 .env
-.streamlit/
+.streamlit/secrets.toml
 vector_store/*.bin
 venv/
 .venv/
