@@ -10,8 +10,8 @@ tiktoken>=0.7.0
 requests>=2.32.3
 numpy>=1.26.4
 pydantic>=2.8.2
-
 langgraph>=0.2.40
 langchain-core>=0.2.35
 langchain-community>=0.2.10
 networkx>=3.2.1
+python-dateutil>=2.9
