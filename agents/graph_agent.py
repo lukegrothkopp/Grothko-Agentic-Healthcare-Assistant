@@ -1,6 +1,7 @@
-
+import os
 from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langchain.tools import Tool
@@ -109,6 +110,8 @@ import os
 from langchain_openai import ChatOpenAI
 
 def build_graph(model_name: str = "gpt-4o-mini"):
+    key = os.getenv("OPENAI_API_KEY", "").strip()
+    has_key = key.startswith("sk-")
     llm = ChatOpenAI(model=model_name, temperature=0.1, api_key=key) if has_key else None
     tools: List[Tool] = []
     search_tool = get_medical_search_tool()
