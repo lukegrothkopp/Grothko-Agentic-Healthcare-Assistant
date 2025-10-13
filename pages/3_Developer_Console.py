@@ -2,6 +2,7 @@ import os, json, pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from generate_faiss_index import generate_index
+from utils.rag_pipeline import RAGPipeline
 
 load_dotenv()
 
