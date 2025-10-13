@@ -1,3 +1,4 @@
+
 from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -8,6 +9,8 @@ from tools.record_tool import get_record_tools
 from tools.booking_tool import get_booking_tool
 from tools.offline_kb_tool import get_offline_kb_tool
 from utils.rag_pipeline import RAGPipeline
+import json, re, datetime
+from datetime import date, timedelta
 
 SYSTEM_SAFETY = (
     "You are a cautious healthcare admin/info assistant. "
@@ -19,6 +22,7 @@ class AgentState(TypedDict):
     messages: List
     intent: Optional[str]
     result: Optional[str]
+    patient_id: Optional[str]
 
 def _classify_intent(text: str) -> str:
     t = text.lower()
@@ -32,17 +36,87 @@ def _classify_intent(text: str) -> str:
         return "search"
     return "search"
 
+DATE_PAT = re.compile(r"(20\d{2}-\d{2}-\d{2})|((?:\d{1,2})/(?:\d{1,2})/(?:20\d{2}))", re.I)
+WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
+
+def _next_weekday(target_idx: int, today: date) -> date:
+    days_ahead = (target_idx - today.weekday() + 7) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return today + timedelta(days=days_ahead)
+
+def _parse_relative_date_phrase(text: str, today: date = None) -> str | None:
+    if not text:
+        return None
+    text_l = text.lower().strip()
+    if today is None:
+        today = date.today()
+
+    if "today" in text_l:
+        return today.isoformat()
+    if "tomorrow" in text_l:
+        return (today + timedelta(days=1)).isoformat()
+
+    m = re.search(r"next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", text_l)
+    if m:
+        wd = WEEKDAYS[m.group(1)]
+        d = _next_weekday(wd, today)
+        return d.isoformat()
+
+    m2 = re.search(r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", text_l)
+    if m2:
+        wd = WEEKDAYS[m2.group(1)]
+        days_ahead = (wd - today.weekday() + 7) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        d = today + timedelta(days=days_ahead)
+        return d.isoformat()
+
+    return None
+
+def _extract_date(text: str) -> str | None:
+    m = DATE_PAT.search(text or "")
+    if m:
+        d = m.group(0)
+        if "/" in d:
+            mm, dd, yyyy = d.split("/")
+            return f"{yyyy}-{int(mm):02d}-{int(dd):02d}"
+        return d
+    return _parse_relative_date_phrase(text)
+
+def _extract_doctor(text: str) -> str | None:
+    m = re.search(r"Dr\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", text or "")
+    if m:
+        return m.group(1)
+    if "hypertension" in (text or "").lower():
+        return "Hypertension Specialist (Cardiologist)"
+    if "kidney" in (text or "").lower() or "nephro" in (text or "").lower():
+        return "Nephrologist"
+    return None
+
+def _make_booking_payload(user_text: str, fallback_pid: Optional[str]) -> str:
+    pid = None
+    m = re.search(r"patient[_\s-]?(\d{3,})", user_text or "", re.I)
+    if m:
+        pid = f"patient_{m.group(1)}"
+    pid = pid or fallback_pid
+    date_iso = _extract_date(user_text) or (date.today() + timedelta(days=7)).isoformat()
+    doc = _extract_doctor(user_text) or "Primary Care"
+    payload = {"patient_id": pid, "doctor_name": doc, "appointment_date": date_iso}
+    return json.dumps(payload)
+
 def build_graph(model_name: str = "gpt-4o-mini"):
     llm = ChatOpenAI(model=model_name, temperature=0.1)
-    # Tools
     tools: List[Tool] = []
     search_tool = get_medical_search_tool()
     tools.append(search_tool)
-    tools.extend(get_record_tools())
-    tools.append(get_booking_tool())
-    tools.append(get_offline_kb_tool())
+    rec_tools = get_record_tools()
+    tools.extend(rec_tools)
+    booking_tool = get_booking_tool()
+    tools.append(booking_tool)
+    offline_kb = get_offline_kb_tool()
+    tools.append(offline_kb)
     rag = RAGPipeline()
-    # lightweight RAG tool inline to avoid circular import in graph
     def rag_retrieve(q: str) -> str:
         pairs = rag.retrieve(q, k=3)
         if not pairs:
@@ -51,7 +125,6 @@ def build_graph(model_name: str = "gpt-4o-mini"):
     tools.append(Tool(name="RAG Retrieve", func=rag_retrieve,
                       description="Retrieve high-level snippets from local medical KB (no internet)."))
 
-    # Nodes
     def start(state: AgentState) -> AgentState:
         return state
 
@@ -62,66 +135,49 @@ def build_graph(model_name: str = "gpt-4o-mini"):
         return state
 
     def route(state: AgentState) -> str:
-        intent = state.get("intent") or "search"
-        if intent == "booking":
-            return "booking"
-        if intent == "records":
-            return "records"
-        if intent == "rag":
-            return "rag"
-        return "search"
+        return state.get("intent") or "search"
 
     def do_booking(state: AgentState) -> AgentState:
-        # Ask model to produce the JSON payload for booking tool
-        msgs = [
-            SystemMessage(content=SYSTEM_SAFETY + " Produce a JSON payload with keys patient_id, doctor_name, appointment_date."),
-            *state["messages"]
-        ]
-        j = llm.invoke(msgs).content
-        result = tools[-3].run(j)  # Book Appointment tool position kept stable
+        user_text = state["messages"][-1].content
+        payload = _make_booking_payload(user_text, state.get("patient_id"))
+        result = booking_tool.run(payload)
         state["result"] = result
         return state
 
     def do_records(state: AgentState) -> AgentState:
-        # Try retrieval first if user asks to see history; else update
         user_text = state["messages"][-1].content.lower()
+        manage_tool, retrieve_tool = rec_tools[0], rec_tools[1]
         if any(w in user_text for w in ["get", "show", "retrieve"]):
-            # expects patient_id string
-            result = tools[-2].run(user_text.split()[-1])  # naive: last token as patient_id
+            pid = state.get("patient_id") or "patient_001"
+            result = retrieve_tool.run(pid)
         else:
-            # ask model to craft JSON payload {patient_id, data:{...}}
-            msgs = [
-                SystemMessage(content=SYSTEM_SAFETY + " Create JSON with keys patient_id and data (object to merge)."),
-                *state["messages"]
-            ]
-            payload = llm.invoke(msgs).content
-            result = tools[-3].run(payload)  # Manage Medical Records
+            pid = state.get("patient_id") or "patient_001"
+            payload = json.dumps({"patient_id": pid, "data": {"notes": "Updated by agent."}})
+            result = manage_tool.run(payload)
         state["result"] = result
         return state
 
     def do_search(state: AgentState) -> AgentState:
-        # First try offline KB to ensure something helpful even if web is blocked
         user_text = state["messages"][-1].content
-        offline = tools[-4].run(user_text)  # Offline Medical KB
-        if not offline.startswith("No offline"):
+        offline = offline_kb.run(user_text)
+        if not offline.startswith("No offline KB"):
             state["result"] = offline
             return state
-        # Fallback to web search
-        result = tools[0].run(user_text)
+        result = search_tool.run(user_text)
         state["result"] = result
         return state
 
     def do_rag(state: AgentState) -> AgentState:
         user_text = state["messages"][-1].content
-        result = tools[-1].run(user_text)  # RAG Retrieve
+        result = tools[-1].run(user_text)
         state["result"] = result
         return state
 
     def finalize(state: AgentState) -> AgentState:
-        # Wrap the tool result into a safe, tidy answer
         msgs = [
             SystemMessage(content=SYSTEM_SAFETY + " Rewrite the following tool output into 3–6 concise bullets. Keep sources if present."),
-            HumanMessage(content=state.get("result") or "No result.")
+            state["messages"][-1],
+            HumanMessage(content=state.get("result") or "No result."),
         ]
         answer = llm.invoke(msgs).content
         state["messages"].append(AIMessage(content=answer))
@@ -152,3 +208,4 @@ def build_graph(model_name: str = "gpt-4o-mini"):
 
     app = graph.compile()
     return app
+
