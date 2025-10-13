@@ -9,7 +9,19 @@ load_dotenv()
 for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "TAVILY_API_KEY"):
     if k in st.secrets and st.secrets[k]:
         os.environ[k] = str(st.secrets[k]).strip()
-        
+
+if os.getenv("OPENAI_API_KEY"):
+    try:
+        if not os.path.exists("vector_store/faiss_index.bin"):
+            from generate_faiss_index import generate_index
+            with st.spinner("Building FAISS index for local KB…"):
+                generate_index()  # uses data/medical_kb/
+            st.success("FAISS index built.")
+    except Exception as e:
+        st.warning(f"Could not build FAISS index: {e}")
+else:
+    st.info("No OPENAI_API_KEY detected — RAG will use a TF-IDF fallback (still works).")
+
 st.set_page_config(page_title="Grothko Agentic Healthcare Assistant", layout="wide")
 st.title("👨‍⚕️ Grothko Agentic Healthcare Assistant")
 st.caption("Not medical advice. High-level info & logistics only.")
