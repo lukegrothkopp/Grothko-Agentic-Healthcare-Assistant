@@ -1,21 +1,31 @@
+# app.py (top-level setup)
 import os
+import streamlit as st
+from dotenv import load_dotenv
 import json
 from datetime import datetime
 import pandas as pd
-import streamlit as st
-from dotenv import load_dotenv
 
-# --- Secrets & Environment ---
-load_dotenv()  # loads .env locally; Streamlit Cloud uses st.secrets
-try:
-    import streamlit as st
-    # Promote st.secrets into env so libraries (OpenAI, etc.) can find them
-    for key in ('OPENAI_API_KEY', 'SERPAPI_API_KEY'):
-        if key in st.secrets:
-            os.environ[key] = st.secrets[key]
-except Exception:
-    pass
+from core.db import init_db, seed_demo, list_patients, list_doctors, list_appointments
 
+load_dotenv()
+
+# Promote Streamlit secrets -> env so libraries using os.getenv(...) work
+for key in ("OPENAI_API_KEY", "SERPAPI_API_KEY", "DB_PATH"):
+    if key in st.secrets:
+        os.environ[key] = str(st.secrets[key])
+
+# Initialize DB and (optionally) seed once per session
+if "db_initialized" not in st.session_state:
+    init_db()
+    # Seed only on first run or if you want a toggle/checkbox in the UI
+    seed_demo()
+    st.session_state["db_initialized"] = True
+
+# --- Now it's safe to read ---
+patients = list_patients()
+doctors = list_doctors()
+appointments = list_appointments()
 
 from core.db import init_db, seed_demo, list_patients, list_doctors, list_appointments, add_patient
 from core.logging import RunLogger
