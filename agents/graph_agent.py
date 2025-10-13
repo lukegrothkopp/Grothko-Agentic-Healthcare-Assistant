@@ -109,7 +109,7 @@ import os
 from langchain_openai import ChatOpenAI
 
 def build_graph(model_name: str = "gpt-4o-mini"):
-    llm = ChatOpenAI(model=model_name, temperature=0.1, api_key=key) if has_key else none
+    llm = ChatOpenAI(model=model_name, temperature=0.1, api_key=key) if has_key else None
     tools: List[Tool] = []
     search_tool = get_medical_search_tool()
     tools.append(search_tool)
