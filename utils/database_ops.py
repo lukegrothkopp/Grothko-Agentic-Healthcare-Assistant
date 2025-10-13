@@ -55,14 +55,12 @@ def _ensure_patient(patient_id: str) -> Dict[str, Any]:
     return rec
 
 # NEW: append an appointment and persist
-def add_appointment(patient_id: str, appt: Dict[str, Any]) -> None:
+def add_appointment(patient_id: str, appt: dict) -> None:
     db = _load_db()
-    rec = db.get(patient_id)
-    if not rec:
-        rec = _ensure_patient(patient_id)
-        db = _load_db()  # reload after ensure
-    rec = db.get(patient_id)
-    rec.setdefault("appointments", [])
-    rec["appointments"].append(appt)
+    rec = db.get(patient_id) or {
+        "name": patient_id, "age": None, "conditions": [],
+        "history": [], "appointments": []
+    }
+    rec.setdefault("appointments", []).append(appt)
     db[patient_id] = rec
     _save_db(db)
