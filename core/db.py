@@ -1,3 +1,17 @@
+import os
+DB_PATH = "data/healthcare.db"
+
+@contextmanager
+def get_conn():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
 """
 SQLite database layer for Patients, Doctors, Appointments, and Medical Histories.
 """
