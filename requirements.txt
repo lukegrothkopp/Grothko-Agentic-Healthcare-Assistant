@@ -7,4 +7,5 @@ scikit-learn>=1.4
 python-dateutil>=2.9
 pydantic>=2.9
 SQLAlchemy>=2.0
+openai>=1.40.0
 
