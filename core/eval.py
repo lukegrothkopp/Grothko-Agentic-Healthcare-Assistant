@@ -1,4 +1,3 @@
-python
 """
 Lightweight evaluation utilities (heuristic Q/A scoring).
 """
