@@ -1,7 +1,9 @@
 __pycache__/
 .env
 .streamlit/secrets.toml
-vector_store/*.bin
+vector_store/*
+!vector_store/faiss_index.bin
+!vector_store/faiss_index.bin.docs.txt
 venv/
 .venv/
 .DS_Store
