@@ -1,0 +1,7 @@
+__pycache__/
+.env
+.streamlit/
+vector_store/*.bin
+venv/
+.venv/
+.DS_Store
