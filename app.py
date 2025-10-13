@@ -5,6 +5,18 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from dotenv import load_dotenv
+load_dotenv()  # local dev via .env; on Streamlit Cloud you’ll use st.secrets
+
+# Promote Streamlit secrets into environment variables so downstream libs see them
+try:
+    import streamlit as st
+    for key in ("OPENAI_API_KEY", "SERPAPI_API_KEY"):
+        if key in st.secrets:
+            os.environ[key] = st.secrets[key]
+except Exception:
+    pass
+    
 from core.db import init_db, seed_demo, list_patients, list_doctors, list_appointments, add_patient
 from core.logging import RunLogger
 from core.memory import MemoryStore
@@ -14,6 +26,8 @@ from agents.booking import BookingAgent
 from agents.history import HistoryAgent
 from agents.info_search import InfoSearchAgent
 from prompts import SUMMARY_PROMPT
+
+
 
 # ---------- Setup ----------
 load_dotenv(override=True)
@@ -28,7 +42,7 @@ with st.sidebar:
         st.success("Database initialized with demo data.")
     st.divider()
     st.subheader("Environment")
-    st.caption("Set your keys in `.env` (OPENAI_API_KEY, optional BING_API_KEY).")
+    st.caption("Set your keys in `.env` (OPENAI_API_KEY).")
 
 if "logger" not in st.session_state:
     st.session_state.logger = RunLogger()
