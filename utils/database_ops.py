@@ -30,6 +30,39 @@ def update_patient_record(patient_id: str, data: Dict[str, Any]) -> bool:
     if patient_id not in db:
         db[patient_id] = data
     else:
+        # shallow merge for dict fields
         db[patient_id].update(data)
     _save_db(db)
     return True
+
+# NEW: ensure a minimal record exists
+def _ensure_patient(patient_id: str) -> Dict[str, Any]:
+    db = _load_db()
+    rec = db.get(patient_id)
+    if not rec:
+        rec = {
+            "name": patient_id,           # or set elsewhere
+            "age": None,
+            "conditions": [],
+            "history": [],
+            "appointments": []
+        }
+        db[patient_id] = rec
+        _save_db(db)
+    # normalize list fields
+    rec.setdefault("history", [])
+    rec.setdefault("appointments", [])
+    return rec
+
+# NEW: append an appointment and persist
+def add_appointment(patient_id: str, appt: Dict[str, Any]) -> None:
+    db = _load_db()
+    rec = db.get(patient_id)
+    if not rec:
+        rec = _ensure_patient(patient_id)
+        db = _load_db()  # reload after ensure
+    rec = db.get(patient_id)
+    rec.setdefault("appointments", [])
+    rec["appointments"].append(appt)
+    db[patient_id] = rec
+    _save_db(db)
