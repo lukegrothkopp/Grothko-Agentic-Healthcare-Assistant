@@ -8,7 +8,7 @@ for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
         os.environ[k] = str(st.secrets[k]).strip()
 
 st.set_page_config(page_title="Developer Console", layout="wide")
-st.title("🧪 Developer Console")
+st.title("⚕️ Developer Console")
 
 # Gate with an admin code
 required = os.environ.get("ADMIN_TOKEN") or st.secrets.get("ADMIN_TOKEN", "")
