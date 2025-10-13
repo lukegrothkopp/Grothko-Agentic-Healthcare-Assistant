@@ -36,6 +36,30 @@ if st.button("Build FAISS index now"):
             except Exception as e:
                 st.error(f"Failed to build: {e}")
 
+# ---- Probe the local KB (FAISS/TF-IDF) ----
+st.markdown("---")
+st.subheader("Probe the local KB")
+
+probe_q = st.text_input(
+    "Test a query against the local medical KB",
+    "latest CKD treatments",
+    key="kb_probe_q",
+)
+if st.button("Retrieve top-3", key="kb_probe_btn"):
+    rag = RAGPipeline()
+    if not probe_q.strip():
+        st.info("Enter a query to retrieve.")
+    else:
+        pairs = rag.retrieve(probe_q, k=3)
+        st.caption(f"Backend in use: {getattr(rag, 'backend', 'unknown')} "
+                   f"(FAISS if OpenAI key + index present; TF-IDF otherwise)")
+        if not pairs:
+            st.info("No results from KB.")
+        else:
+            for i, (text, score) in enumerate(pairs, 1):
+                st.write(f"**{i}.** score={score:.4f}")
+                st.write(text[:1000] + ("…" if len(text) > 1000 else ""))
+
 # ---- QA Eval (QAEvalChain) ----
 st.markdown("---")
 st.subheader("Q&A Eval (LLM-as-judge)")
