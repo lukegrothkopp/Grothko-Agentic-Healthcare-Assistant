@@ -3,6 +3,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
 for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
     if k in st.secrets and st.secrets[k]:
         os.environ[k] = str(st.secrets[k]).strip()
