@@ -1,0 +1,62 @@
+{
+  "lung cancer": [
+    {
+      "text": "Lung cancer comprises mainly non\u2013small cell (\u224880\u201385%) and small cell subtypes (~15%), which differ in staging and therapy approaches.",
+      "source": "NCI (cancer.gov)"
+    },
+    {
+      "text": "Key risk factors: tobacco smoking, secondhand smoke, radon, occupational exposures (e.g., asbestos), and air pollution.",
+      "source": "CDC (cdc.gov)"
+    },
+    {
+      "text": "Diagnosis uses chest CT, biopsy for histology, and staging (TNM for NSCLC; limited vs. extensive for SCLC).",
+      "source": "NCI (cancer.gov)"
+    },
+    {
+      "text": "Treatments vary by stage and subtype: surgery, radiation, chemo, targeted (EGFR/ALK/ROS1/BRAF/MET/KRAS G12C) and immunotherapy (PD-1/PD-L1).",
+      "source": "NICE / NCI / Mayo Clinic"
+    },
+    {
+      "text": "Low-dose CT screening is recommended for certain high-risk adults; supportive care includes smoking cessation and symptom control.",
+      "source": "CDC / USPSTF summaries"
+    }
+  ],
+  "chronic kidney disease": [
+    {
+      "text": "CKD is persistent kidney damage or eGFR <60 for \u22653 months; diabetes and hypertension are common causes.",
+      "source": "NIDDK (niddk.nih.gov)"
+    },
+    {
+      "text": "Management includes BP and glucose control, ACEi/ARB, SGLT2 inhibitors, and nephrology referral by risk.",
+      "source": "NICE / KDIGO / NIH"
+    },
+    {
+      "text": "Lifestyle measures and vaccinations reduce complications.",
+      "source": "CDC / NIDDK"
+    }
+  ],
+  "hypertension": [
+    {
+      "text": "Hypertension is persistently elevated BP confirmed with repeated or ambulatory monitoring.",
+      "source": "NICE / CDC"
+    },
+    {
+      "text": "First-line drugs often include thiazide-like diuretics, ACEi/ARB, or CCBs; lifestyle change is foundational.",
+      "source": "NICE / NIH"
+    }
+  ],
+  "diabetes": [
+    {
+      "text": "Type 1 involves autoimmune \u03b2-cell loss; Type 2 involves insulin resistance with relative deficiency.",
+      "source": "NIH / CDC"
+    },
+    {
+      "text": "Management: lifestyle, metformin first-line for T2D, + GLP-1 RAs / SGLT2 inhibitors / insulin per comorbidities and A1c.",
+      "source": "NICE / NIH"
+    },
+    {
+      "text": "Screen for complications: eyes, kidneys, feet; manage BP/lipids; personalize targets.",
+      "source": "CDC / NIH"
+    }
+  ]
+}
