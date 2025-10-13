@@ -1,27 +1,18 @@
-# core/db.py
 from __future__ import annotations
-
 import os
 import sqlite3
 from contextlib import contextmanager
-from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
-# Resolve DB path from env or default
-DB_PATH = os.getenv("DB_PATH", "data/healthcare.db")
+DB_PATH = os.getenv("DB_PATH", "./data/gha.sqlite")
 
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 @contextmanager
-def get_conn():
-    # Ensure parent directory exists
-    db_dir = os.path.dirname(DB_PATH) or "."
-    os.makedirs(db_dir, exist_ok=True)
-
+def connect():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    # Helpful pragmas for small apps
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
     try:
         yield conn
         conn.commit()
@@ -29,206 +20,173 @@ def get_conn():
         conn.close()
 
 
-def init_db() -> None:
-    """Create tables if they don't exist."""
-    with get_conn() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS patients (
-                id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                name     TEXT NOT NULL,
-                age      INTEGER,
-                sex      TEXT,
-                contact  TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS doctors (
-                id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                name     TEXT NOT NULL,
-                specialty TEXT,
-                contact   TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS appointments (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                patient_id INTEGER NOT NULL,
-                doctor_id  INTEGER NOT NULL,
-                appt_time  TEXT NOT NULL,
-                reason     TEXT,
-                FOREIGN KEY(patient_id) REFERENCES patients(id),
-                FOREIGN KEY(doctor_id)  REFERENCES doctors(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT
-            );
-            """
+def init_db(seed: bool = True) -> None:
+    with connect() as c:
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS patients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            age INTEGER,
+            notes TEXT
         )
-
-
-def _get_meta(conn: sqlite3.Connection, key: str, default: Optional[str] = None) -> Optional[str]:
-    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-    return row["value"] if row else default
-
-
-def _set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
-    conn.execute(
-        """
-        INSERT INTO meta(key, value) VALUES(?, ?)
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value
-        """,
-        (key, value),
-    )
-
-
-def seed_demo() -> None:
-    """Insert a small set of demo rows once."""
-    with get_conn() as conn:
-        if _get_meta(conn, "seeded", "0") == "1":
-            return
-
-        # Patients
-        conn.executemany(
-            "INSERT INTO patients(name, age, sex, contact) VALUES (?, ?, ?, ?)",
-            [
-                ("Ava Nguyen", 44, "F", "ava@example.com"),
-                ("Marcus Grothkopp", 14, "M", "marcus@example.com"),
-                ("Mia Grothkopp", 12, "F", "mia@example.com"),
-            ],
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS doctors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            specialty TEXT NOT NULL,
+            location TEXT
         )
-
-        # Doctors
-        conn.executemany(
-            "INSERT INTO doctors(name, specialty, contact) VALUES (?, ?, ?)",
-            [
-                ("Dr. Priya Raman", "Nephrology", "priya.raman@clinic.org"),
-                ("Dr. Diego Silva", "Primary Care", "diego.silva@clinic.org"),
-                ("Dr. Elena Park", "Cardiology", "elena.park@clinic.org"),
-            ],
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS appointments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER NOT NULL,
+            doctor_id INTEGER NOT NULL,
+            start_ts TEXT NOT NULL,
+            end_ts TEXT NOT NULL,
+            status TEXT DEFAULT 'booked',
+            FOREIGN KEY(patient_id) REFERENCES patients(id),
+            FOREIGN KEY(doctor_id) REFERENCES doctors(id)
         )
-
-        # Sample appointments (optional)
-        conn.executemany(
-            "INSERT INTO appointments(patient_id, doctor_id, appt_time, reason) VALUES (?, ?, ?, ?)",
-            [
-                (1, 1, "2025-10-15T10:00", "Follow-up"),
-                (2, 2, "2025-10-16T14:30", "Annual physical"),
-            ],
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS histories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER NOT NULL,
+            entry_ts TEXT NOT NULL,
+            text TEXT NOT NULL,
+            tags TEXT,
+            FOREIGN KEY(patient_id) REFERENCES patients(id)
         )
-
-        _set_meta(conn, "seeded", "1")
-
-
-# -----------------------
-# Existence helpers
-# -----------------------
-def patient_exists(patient_id: int) -> bool:
-    with get_conn() as conn:
-        row = conn.execute("SELECT 1 FROM patients WHERE id = ?", (patient_id,)).fetchone()
-        return bool(row)
+        """)
+    if seed:
+        seed_db()
 
 
-def doctor_exists(doctor_id: int) -> bool:
-    with get_conn() as conn:
-        row = conn.execute("SELECT 1 FROM doctors WHERE id = ?", (doctor_id,)).fetchone()
-        return bool(row)
+def seed_db():
+    with connect() as c:
+        # Seed doctors if empty
+        cur = c.execute("SELECT COUNT(*) as n FROM doctors")
+        if cur.fetchone()[0] == 0:
+            c.executemany(
+                "INSERT INTO doctors (name, specialty, location) VALUES (?,?,?)",
+                [
+                    ("Dr. Alice Ren", "Nephrology", "Seattle, WA"),
+                    ("Dr. Brian Cho", "Cardiology", "Bellevue, WA"),
+                    ("Dr. Carla Mehta", "Endocrinology", "Seattle, WA"),
+                    ("Dr. Diego Ruiz", "Primary Care", "Kirkland, WA"),
+                ],
+            )
+        # Seed a demo patient
+        cur = c.execute("SELECT COUNT(*) as n FROM patients")
+        if cur.fetchone()[0] == 0:
+            c.execute(
+                "INSERT INTO patients (name, age, notes) VALUES (?,?,?)",
+                ("John Doe", 70, "Demo patient for testing"),
+            )
 
 
-# -----------------------
-# CRUD & query helpers
-# -----------------------
-def add_patient(name: str, age: int, sex: str, contact: str) -> int:
-    with get_conn() as conn:
-        cur = conn.execute(
-            "INSERT INTO patients(name, age, sex, contact) VALUES (?, ?, ?, ?)",
-            (name, age, sex, contact),
+def list_patients() -> List[sqlite3.Row]:
+    with connect() as c:
+        return list(c.execute("SELECT * FROM patients ORDER BY id"))
+
+
+def upsert_patient(name: str, age: Optional[int] = None, notes: str = "") -> int:
+    with connect() as c:
+        c.execute("INSERT INTO patients (name, age, notes) VALUES (?,?,?)", (name, age, notes))
+        return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
+def find_doctors(specialty: str, location_like: str = "") -> List[sqlite3.Row]:
+    q = "SELECT * FROM doctors WHERE specialty LIKE ? AND location LIKE ? ORDER BY name"
+    with connect() as c:
+        return list(c.execute(q, (f"%{specialty}%", f"%{location_like}%")))
+
+
+def doctor_by_id(doc_id: int) -> Optional[sqlite3.Row]:
+    with connect() as c:
+        cur = c.execute("SELECT * FROM doctors WHERE id=?", (doc_id,))
+        return cur.fetchone()
+
+
+def patient_by_id(pid: int) -> Optional[sqlite3.Row]:
+    with connect() as c:
+        cur = c.execute("SELECT * FROM patients WHERE id=?", (pid,))
+        return cur.fetchone()
+
+
+def list_appointments(patient_id: Optional[int] = None) -> List[sqlite3.Row]:
+    with connect() as c:
+        if patient_id is None:
+            cur = c.execute(
+                "SELECT a.*, p.name as patient_name, d.name as doctor_name FROM appointments a\n"
+                "JOIN patients p ON p.id=a.patient_id JOIN doctors d ON d.id=a.doctor_id\n"
+                "ORDER BY start_ts DESC"
+            )
+        else:
+            cur = c.execute(
+                "SELECT a.*, p.name as patient_name, d.name as doctor_name FROM appointments a\n"
+                "JOIN patients p ON p.id=a.patient_id JOIN doctors d ON d.id=a.doctor_id\n"
+                "WHERE a.patient_id=? ORDER BY start_ts DESC",
+                (patient_id,),
+            )
+        return list(cur)
+
+
+def available_slots(doctor_id: int, days_ahead: int = 14) -> List[Tuple[str, str]]:
+    """Return (start_ts, end_ts) pairs for 30-min slots 9am-5pm next N days, excluding booked."""
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    slots: List[Tuple[str, str]] = []
+    with connect() as c:
+        booked = {
+            r["start_ts"] for r in c.execute(
+                "SELECT start_ts FROM appointments WHERE doctor_id=? AND date(start_ts) >= date('now')",
+                (doctor_id,),
+            )
+        }
+    for d in range(days_ahead):
+        day = today + timedelta(days=d)
+        for h in range(9, 17):
+            for m in (0, 30):
+                start = day.replace(hour=h, minute=m)
+                end = start + timedelta(minutes=30)
+                s = start.isoformat(sep=" ")
+                if s not in booked:
+                    slots.append((s, end.isoformat(sep=" ")))
+    return slots
+
+
+def book_appointment(patient_id: int, doctor_id: int, start_ts: str, end_ts: str) -> int:
+    with connect() as c:
+        # Ensure not double-booked
+        cur = c.execute(
+            "SELECT 1 FROM appointments WHERE doctor_id=? AND start_ts=?",
+            (doctor_id, start_ts),
         )
-        return cur.lastrowid
-
-
-def list_patients() -> List[Dict[str, Any]]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT id, name, age, sex, contact FROM patients ORDER BY name COLLATE NOCASE ASC"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def list_doctors() -> List[Dict[str, Any]]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT id, name, specialty, contact FROM doctors ORDER BY specialty COLLATE NOCASE, name COLLATE NOCASE"
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def list_appointments() -> List[Dict[str, Any]]:
-    """
-    Return appointments with joined patient/doctor names for a nicer DataFrame.
-    """
-    with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                a.id,
-                a.patient_id,
-                p.name AS patient_name,
-                a.doctor_id,
-                d.name AS doctor_name,
-                a.appt_time,
-                a.reason
-            FROM appointments a
-            LEFT JOIN patients p ON p.id = a.patient_id
-            LEFT JOIN doctors  d ON d.id = a.doctor_id
-            ORDER BY a.appt_time DESC, a.id DESC
-            """
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def create_appointment(patient_id: int, doctor_id: int, appt_time: str, reason: str = "") -> Dict[str, Any]:
-    """
-    Insert a new appointment. appt_time must be ISO-8601 (e.g., '2025-10-15T10:00').
-    Returns a dict with success flag and inserted row fields.
-    """
-    # Validate timestamp
-    try:
-        datetime.fromisoformat(appt_time)
-    except Exception:
-        return {"success": False, "error": f"Invalid ISO datetime: {appt_time}"}
-
-    # Optional sanity checks
-    if not patient_exists(patient_id):
-        return {"success": False, "error": f"Patient #{patient_id} not found"}
-    if not doctor_exists(doctor_id):
-        return {"success": False, "error": f"Doctor #{doctor_id} not found"}
-
-    with get_conn() as conn:
-        cur = conn.execute(
-            """
-            INSERT INTO appointments (patient_id, doctor_id, appt_time, reason)
-            VALUES (?, ?, ?, ?)
-            """,
-            (patient_id, doctor_id, appt_time, reason or ""),
+        if cur.fetchone():
+            raise ValueError("Slot already booked.")
+        c.execute(
+            "INSERT INTO appointments (patient_id, doctor_id, start_ts, end_ts) VALUES (?,?,?,?)",
+            (patient_id, doctor_id, start_ts, end_ts),
         )
-        appt_id = cur.lastrowid
-        row = conn.execute(
-            """
-            SELECT
-                a.id,
-                a.patient_id,
-                p.name AS patient_name,
-                a.doctor_id,
-                d.name AS doctor_name,
-                a.appt_time,
-                a.reason
-            FROM appointments a
-            LEFT JOIN patients p ON p.id = a.patient_id
-            LEFT JOIN doctors  d ON d.id = a.doctor_id
-            WHERE a.id = ?
-            """,
-            (appt_id,),
-        ).fetchone()
+        return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
 
-    return {"success": True, **(dict(row) if row else {"id": appt_id})}
+
+def add_history(patient_id: int, text: str, tags: str = "") -> int:
+    with connect() as c:
+        ts = datetime.now().isoformat(sep=" ")
+        c.execute(
+            "INSERT INTO histories (patient_id, entry_ts, text, tags) VALUES (?,?,?,?)",
+            (patient_id, ts, text, tags),
+        )
+        return int(c.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
+def get_history(patient_id: int) -> List[sqlite3.Row]:
+    with connect() as c:
+        cur = c.execute(
+            "SELECT * FROM histories WHERE patient_id=? ORDER BY entry_ts DESC",
+            (patient_id,),
+        )
+        return list(cur)
