@@ -22,6 +22,26 @@ with st.sidebar:
     patient_id = st.text_input("Patient ID", "patient_001")
     st.caption("Tip: You can use natural phrases like 'book a cardiologist next Monday'.")
 
+    st.markdown("---")
+    st.subheader("Book an appointment")
+    appt_text = st.text_input(
+        "Describe the appointment",
+        value="Book a hypertension follow-up next Monday"
+    )
+    if st.button("Book"):
+        with st.spinner("Booking…"):
+            try:
+                state = {
+                "messages": [HumanMessage(content=appt_text)],
+                "intent": None,
+                "result": None,
+                "patient_id": pid
+                }
+                result = graph.invoke(state)
+                st.success(result["messages"][-1].content)
+            except Exception as e:
+                st.error(f"Failed: {e}")
+
 # Chat UI (patient only)
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -50,22 +70,3 @@ if prompt := st.chat_input("How can I help you today?"):
             st.markdown(answer)
     st.session_state.messages.append({"role": "assistant", "content": answer})
 
-    st.markdown("---")
-    st.subheader("Book an appointment")
-    appt_text = st.text_input(
-        "Describe the appointment",
-        value="Book a hypertension follow-up next Monday"
-    )
-    if st.button("Book"):
-        with st.spinner("Booking…"):
-            try:
-                state = {
-                "messages": [HumanMessage(content=appt_text)],
-                "intent": None,
-                "result": None,
-                "patient_id": pid
-                }
-                result = graph.invoke(state)
-                st.success(result["messages"][-1].content)
-            except Exception as e:
-                st.error(f"Failed: {e}")
