@@ -123,26 +123,25 @@ with hist_tab:
 with info_tab:
     st.subheader("Medical information search (high level)")
     q = st.text_input("Query", value="chronic kidney disease latest treatments")
+    use_llm = st.checkbox("Use LLM summarization (requires OPENAI_API_KEY)", value=True)
 
-    # Keep latest result in session so we can render even after reruns
     if st.button("Search info"):
-        out = info.query(q)
+        out = info.query(q, use_llm=use_llm)
         st.session_state.last_info_out = out
 
-    out = st.session_state.get("last_info_out")  # may be None on first load
+    out = st.session_state.get("last_info_out")
     if out:
-        st.write("**Top sources (filtered for WHO/CDC/NIH/Medline/Mayo):**")
+        st.write("**Top sources (filtered / trusted-first):**")
         st.json(out.get("sources", []))
-        st.markdown("**Extractive bullets:**")
-
+        st.markdown("**Bullets:**")
         bullets = out.get("bullets") or []
         if bullets:
             for b in bullets:
                 st.write(b)
-            # Only add to memory if we have non-empty bullets
+            st.caption(f"LLM summarization used: {out.get('used_llm', False)}")
             st.session_state.memory.add("\n".join(bullets), type="info", query=q)
         else:
-            st.info("No concise snippets found. Try a more specific query (e.g., add a condition, treatment, or guideline keyword).")
+            st.info("No concise snippets found. Try refining the query.")
     else:
         st.caption("Enter a query and click **Search info**.")
 
