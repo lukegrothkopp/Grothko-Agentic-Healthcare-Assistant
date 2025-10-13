@@ -3,7 +3,6 @@ from langchain.tools import Tool
 from utils.database_ops import get_patient_record, update_patient_record
 
 def add_or_update_history(input_str: str) -> str:
-    """Input: JSON with keys patient_id and data (object to merge)."""
     try:
         payload = json.loads(input_str)
         pid = payload.get("patient_id")
