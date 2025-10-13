@@ -127,9 +127,13 @@ with info_tab:
         st.write("**Top sources (filtered for WHO/CDC/NIH/Medline/Mayo):**")
         st.json(out["sources"])
         st.markdown("**Extractive bullets:**")
+    if out["bullets"]:
         for b in out["bullets"]:
             st.write(b)
-        st.session_state.memory.add("\n".join(out["bullets"]), type="info", query=q)
+    # Only add to memory if we have non-empty bullets
+            st.session_state.memory.add("\n".join(out["bullets"]), type="info", query=q)
+        else:
+            st.info("No concise snippets found. Try a more specific query (e.g., add a condition, treatment, or guideline keyword).")
 
 with eval_tab:
     st.subheader("Evaluation & Logs")
