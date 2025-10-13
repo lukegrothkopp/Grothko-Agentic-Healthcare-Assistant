@@ -1,0 +1,3 @@
+Chronic kidney disease (CKD) is defined by persistent kidney damage or reduced eGFR (<60) for ≥3 months.
+Management often includes blood pressure control, glucose management, ACEi/ARB, SGLT2 inhibitors, and risk-based referral to nephrology.
+Lifestyle measures (salt restriction, exercise, smoking cessation) and vaccinations help reduce complications.
