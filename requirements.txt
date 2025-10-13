@@ -15,3 +15,4 @@ langchain-core>=0.2.35
 langchain-community>=0.2.10
 networkx>=3.2.1
 python-dateutil>=2.9
+scikit-learn>=1.3
