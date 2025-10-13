@@ -7,7 +7,6 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 def _llm_polish(bullets: List[Dict[str, str]]) -> List[str]:
     if not OPENAI_KEY:
-        # return formatted bullets without LLM
         return [f"- {b['text']} ({b['source']})" for b in bullets][:6]
     try:
         from openai import OpenAI
@@ -18,7 +17,7 @@ def _llm_polish(bullets: List[Dict[str, str]]) -> List[str]:
             "No medical advice; keep each bullet concise and include source in parentheses."
         )
         user = (
-            "Rewrite the bullets in clear, neutral language (3–6 bullets). Keep the source in parentheses."
+            "Rewrite the bullets in clear, neutral language (3–6 bullets). Keep the source in parentheses.\n\n"
             f"{raw}"
         )
         resp = client.chat.completions.create(
@@ -40,15 +39,13 @@ def _lookup_offline(topic: str) -> List[Dict[str, str]]:
             kb = json.load(f)
     except Exception:
         kb = {}
-    key = topic.strip().lower()
+    key = (topic or "").strip().lower()
     if key in kb:
         return kb[key]
-    # fuzzy best match
     keys = list(kb.keys())
     match = get_close_matches(key, keys, n=1, cutoff=0.6)
     if match:
         return kb.get(match[0], [])
-    # substring scan
     for k in keys:
         if k in key or key in k:
             return kb[k]
