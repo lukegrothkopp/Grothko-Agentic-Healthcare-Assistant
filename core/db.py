@@ -1,4 +1,3 @@
-python
 """
 SQLite database layer for Patients, Doctors, Appointments, and Medical Histories.
 """
