@@ -122,18 +122,28 @@ with hist_tab:
 with info_tab:
     st.subheader("Medical information search (high level)")
     q = st.text_input("Query", value="chronic kidney disease latest treatments")
+
+    # Keep latest result in session so we can render even after reruns
     if st.button("Search info"):
         out = info.query(q)
+        st.session_state.last_info_out = out
+
+    out = st.session_state.get("last_info_out")  # may be None on first load
+    if out:
         st.write("**Top sources (filtered for WHO/CDC/NIH/Medline/Mayo):**")
-        st.json(out["sources"])
+        st.json(out.get("sources", []))
         st.markdown("**Extractive bullets:**")
-    if out["bullets"]:
-        for b in out["bullets"]:
-            st.write(b)
-    # Only add to memory if we have non-empty bullets
-            st.session_state.memory.add("\n".join(out["bullets"]), type="info", query=q)
+
+        bullets = out.get("bullets") or []
+        if bullets:
+            for b in bullets:
+                st.write(b)
+            # Only add to memory if we have non-empty bullets
+            st.session_state.memory.add("\n".join(bullets), type="info", query=q)
         else:
             st.info("No concise snippets found. Try a more specific query (e.g., add a condition, treatment, or guideline keyword).")
+    else:
+        st.caption("Enter a query and click **Search info**.")
 
 with eval_tab:
     st.subheader("Evaluation & Logs")
