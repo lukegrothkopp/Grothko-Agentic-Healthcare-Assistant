@@ -44,23 +44,3 @@ with col2:
             st.success("Note saved.")
         else:
             st.info("Type a note first.")
-
-st.markdown("---")
-st.subheader("Book appointment (natural language)")
-appt_text = st.text_input(
-    "Describe the appointment",
-    value="Book a hypertension follow-up next Monday"
-)
-if st.button("Book"):
-    with st.spinner("Booking…"):
-        try:
-            state = {
-                "messages": [HumanMessage(content=appt_text)],
-                "intent": None,
-                "result": None,
-                "patient_id": pid
-            }
-            result = graph.invoke(state)
-            st.success(result["messages"][-1].content)
-        except Exception as e:
-            st.error(f"Failed: {e}")
