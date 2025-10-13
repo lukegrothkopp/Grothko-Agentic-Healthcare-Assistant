@@ -1,155 +1,114 @@
-"""
-SQLite database layer for Patients, Doctors, Appointments, and Medical Histories.
-"""
-from __future__ import annotations
-import sqlite3
-import os
+# core/db.py
+import os, sqlite3
 from contextlib import contextmanager
-from typing import List, Dict, Any, Optional
-from datetime import datetime
 
-DB_PATH = "data/healthcare.db"
+DB_PATH = os.getenv("DB_PATH", "data/healthcare.db")
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS patients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    first_name TEXT NOT NULL,
+    last_name TEXT NOT NULL,
+    dob TEXT,
+    contact TEXT
+);
+
+CREATE TABLE IF NOT EXISTS doctors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    specialty TEXT
+);
+
+CREATE TABLE IF NOT EXISTS appointments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    patient_id INTEGER NOT NULL,
+    doctor_id INTEGER NOT NULL,
+    appt_time TEXT NOT NULL,
+    reason TEXT,
+    FOREIGN KEY(patient_id) REFERENCES patients(id),
+    FOREIGN KEY(doctor_id) REFERENCES doctors(id)
+);
+"""
 
 @contextmanager
 def get_conn():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    # Ensure directory exists
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
-    finally:
         conn.commit()
+    finally:
         conn.close()
 
+def ensure_schema(conn: sqlite3.Connection):
+    conn.executescript(SCHEMA_SQL)
+
 def init_db():
-    with get_conn() as c:
-        cur = c.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS patients(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            age INTEGER,
-            sex TEXT,
-            contact TEXT
-        )
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS doctors(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            specialty TEXT NOT NULL
-        )
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS appointments(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            patient_id INTEGER NOT NULL,
-            doctor_id INTEGER NOT NULL,
-            appt_time TEXT NOT NULL,
-            status TEXT DEFAULT 'scheduled',
-            FOREIGN KEY(patient_id) REFERENCES patients(id),
-            FOREIGN KEY(doctor_id) REFERENCES doctors(id)
-        )
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS histories(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            patient_id INTEGER NOT NULL,
-            note TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(patient_id) REFERENCES patients(id)
-        )
-        """)
+    with get_conn() as conn:
+        ensure_schema(conn)
 
 def seed_demo():
-    """
-    Seeds demo doctors/patients if tables are empty.
-    """
-    with get_conn() as c:
-        cur = c.cursor()
-        # Doctors
-        cur.execute("SELECT COUNT(*) AS n FROM doctors")
-        if cur.fetchone()["n"] == 0:
-            cur.executemany(
-                "INSERT INTO doctors(name, specialty) VALUES(?, ?)",
+    with get_conn() as conn:
+        ensure_schema(conn)
+        # Only seed if empty
+        cur = conn.execute("SELECT COUNT(1) AS c FROM patients")
+        if cur.fetchone()["c"] == 0:
+            conn.executemany(
+                "INSERT INTO patients (first_name,last_name,dob,contact) VALUES (?,?,?,?)",
                 [
-                    ("Dr. Priya Nayar", "Nephrology"),
-                    ("Dr. Ken Ito", "Cardiology"),
-                    ("Dr. Sofia Alvarez", "Endocrinology"),
-                    ("Dr. Ming Zhao", "Primary Care"),
-                ]
+                    ("Ava","Lopez","1985-03-14","ava@example.com"),
+                    ("Noah","Kim","1990-07-02","noah@example.com"),
+                    ("Mia","Singh","1978-11-22","mia@example.com"),
+                ],
             )
-        # Patients
-        cur.execute("SELECT COUNT(*) AS n FROM patients")
-        if cur.fetchone()["n"] == 0:
-            cur.executemany(
-                "INSERT INTO patients(name, age, sex, contact) VALUES(?, ?, ?, ?)",
+        cur = conn.execute("SELECT COUNT(1) AS c FROM doctors")
+        if cur.fetchone()["c"] == 0:
+            conn.executemany(
+                "INSERT INTO doctors (name,specialty) VALUES (?,?)",
                 [
-                    ("John Smith", 70, "M", "john@example.com"),
-                    ("Ava Johnson", 45, "F", "ava@example.com"),
-                ]
+                    ("Dr. Patel","Nephrology"),
+                    ("Dr. Chen","Cardiology"),
+                    ("Dr. Rivera","Primary Care"),
+                ],
             )
-        # Histories
-        cur.execute("SELECT COUNT(*) AS n FROM histories")
-        if cur.fetchone()["n"] == 0:
-            # Add a CKD note for John Smith (patient_id=1)
-            cur.execute(
-                "INSERT INTO histories(patient_id, note, created_at) VALUES(?, ?, ?)",
-                (1, "Chronic Kidney Disease (Stage 3). On ACE inhibitors. Monitor eGFR quarterly.", datetime.utcnow().isoformat())
+        cur = conn.execute("SELECT COUNT(1) AS c FROM appointments")
+        if cur.fetchone()["c"] == 0:
+            conn.executemany(
+                "INSERT INTO appointments (patient_id,doctor_id,appt_time,reason) VALUES (?,?,?,?)",
+                [
+                    (1,1,"2025-10-15 10:00","CKD follow-up"),
+                    (2,3,"2025-10-17 14:30","Annual physical"),
+                ],
             )
 
-def list_doctors(specialty: Optional[str]=None) -> List[Dict[str, Any]]:
-    with get_conn() as c:
-        cur = c.cursor()
-        if specialty:
-            cur.execute("SELECT * FROM doctors WHERE specialty LIKE ?", (f"%{specialty}%",))
-        else:
-            cur.execute("SELECT * FROM doctors")
-        return [dict(r) for r in cur.fetchall()]
+# --- Safe query helpers -------------------------------------------------------
 
-def list_patients() -> List[Dict[str, Any]]:
-    with get_conn() as c:
-        cur = c.cursor()
-        cur.execute("SELECT * FROM patients")
-        return [dict(r) for r in cur.fetchall()]
+def _safe_select_all(table: str):
+    with get_conn() as conn:
+        try:
+            return list(conn.execute(f"SELECT * FROM {table}"))
+        except sqlite3.OperationalError:
+            # If table missing for any reason, create schema and retry once
+            ensure_schema(conn)
+            return list(conn.execute(f"SELECT * FROM {table}"))
 
-def add_patient(name: str, age: int, sex: str, contact: str) -> int:
-    with get_conn() as c:
-        cur = c.cursor()
-        cur.execute(
-            "INSERT INTO patients(name, age, sex, contact) VALUES(?, ?, ?, ?)",
-            (name, age, sex, contact)
+def list_patients():
+    return _safe_select_all("patients")
+
+def list_doctors():
+    return _safe_select_all("doctors")
+
+def list_appointments():
+    return _safe_select_all("appointments")
+
+def add_patient(first_name: str, last_name: str, dob: str = None, contact: str = None):
+    with get_conn() as conn:
+        ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO patients (first_name,last_name,dob,contact) VALUES (?,?,?,?)",
+            (first_name, last_name, dob, contact),
         )
-        return cur.lastrowid
-
-def add_history(patient_id: int, note: str):
-    with get_conn() as c:
-        cur = c.cursor()
-        cur.execute(
-            "INSERT INTO histories(patient_id, note, created_at) VALUES(?, ?, ?)",
-            (patient_id, note, datetime.utcnow().isoformat())
-        )
-
-def get_history(patient_id: int) -> List[Dict[str, Any]]:
-    with get_conn() as c:
-        cur = c.cursor()
-        cur.execute("SELECT * FROM histories WHERE patient_id=? ORDER BY created_at DESC", (patient_id,))
-        return [dict(r) for r in cur.fetchall()]
-
-def create_appointment(patient_id: int, doctor_id: int, appt_time: str) -> int:
-    with get_conn() as c:
-        cur = c.cursor()
-        cur.execute(
-            "INSERT INTO appointments(patient_id, doctor_id, appt_time) VALUES(?, ?, ?)",
-            (patient_id, doctor_id, appt_time),
-        )
-        return cur.lastrowid
-
-def list_appointments(status: Optional[str]=None) -> List[Dict[str, Any]]:
-    with get_conn() as c:
-        cur = c.cursor()
-        if status:
-            cur.execute("SELECT * FROM appointments WHERE status=?", (status,))
-        else:
-            cur.execute("SELECT * FROM appointments")
-        return [dict(r) for r in cur.fetchall()]
