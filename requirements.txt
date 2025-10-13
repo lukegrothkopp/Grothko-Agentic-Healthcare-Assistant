@@ -1,9 +1,10 @@
 streamlit>=1.37
-pandas>=2.0
-pydantic>=2.5
-openai>=1.40
-chromadb>=0.5.3
-tiktoken>=0.7.0
+pandas>=2.2
+numpy>=1.26
 requests>=2.32
-python-dotenv>=1.0
-loguru>=0.7
+duckduckgo-search>=6.3
+scikit-learn>=1.4
+python-dateutil>=2.9
+pydantic>=2.9
+SQLAlchemy>=2.0
+
