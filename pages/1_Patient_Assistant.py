@@ -10,7 +10,7 @@ for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY"):
         os.environ[k] = str(st.secrets[k]).strip()
 
 st.set_page_config(page_title="Patient Assistant", layout="wide")
-st.title("🩺 Patient Assistant")
+st.title("👩🏽‍⚕️ Patient Assistant")
 st.caption("Demo — not medical advice. Provides high-level info and admin logistics only.")
 
 # Build the agent graph once
