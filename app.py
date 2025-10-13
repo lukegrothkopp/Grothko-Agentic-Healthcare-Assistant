@@ -32,7 +32,7 @@ st.caption("Demo — not medical advice. For admin workflows & high level info o
 
 with st.sidebar:
     st.header("Quick Actions")
-    seed = st.button("Seed demo data")
+    seed = st.button("Seed data")
     if seed:
         db.init_db(seed=True)
         st.toast("Database seeded.")
