@@ -5,18 +5,18 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-from dotenv import load_dotenv
-load_dotenv()  # local dev via .env; on Streamlit Cloud you’ll use st.secrets
-
-# Promote Streamlit secrets into environment variables so downstream libs see them
+# --- Secrets & Environment ---
+load_dotenv()  # loads .env locally; Streamlit Cloud uses st.secrets
 try:
     import streamlit as st
-    for key in ("OPENAI_API_KEY", "SERPAPI_API_KEY"):
+    # Promote st.secrets into env so libraries (OpenAI, etc.) can find them
+    for key in ('OPENAI_API_KEY', 'SERPAPI_API_KEY'):
         if key in st.secrets:
             os.environ[key] = st.secrets[key]
 except Exception:
     pass
-    
+
+
 from core.db import init_db, seed_demo, list_patients, list_doctors, list_appointments, add_patient
 from core.logging import RunLogger
 from core.memory import MemoryStore
@@ -26,8 +26,6 @@ from agents.booking import BookingAgent
 from agents.history import HistoryAgent
 from agents.info_search import InfoSearchAgent
 from prompts import SUMMARY_PROMPT
-
-
 
 # ---------- Setup ----------
 load_dotenv(override=True)
