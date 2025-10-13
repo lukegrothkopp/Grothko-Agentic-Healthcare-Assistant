@@ -81,6 +81,7 @@ with booking_tab:
         doc_names = {f"{d['name']} — {d['specialty']} ({d['location']})": int(d["id"]) for d in docs}
         pick = st.selectbox("Choose doctor", list(doc_names.keys()))
         doc_id = doc_names[pick]
+        st.session_state.doc_id = doc_id
         if st.button("Load slots"):
             st.session_state.slots = booking.get_slots(doc_id)
 
