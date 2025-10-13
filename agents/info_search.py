@@ -1,10 +1,23 @@
 # agents/info_search.py
 from __future__ import annotations
+import os
 import re
 import requests
 from typing import List, Dict, Optional
 from duckduckgo_search import DDGS
 from core.logging import get_logger
+
+# Optional OpenAI import; handled gracefully if not installed/keys missing
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+try:
+    if OPENAI_KEY:
+        from openai import OpenAI
+        _openai_client = OpenAI(api_key=OPENAI_KEY)
+    else:
+        _openai_client = None
+except Exception:
+    _openai_client = None
 
 log = get_logger("InfoSearchAgent")
 
@@ -26,7 +39,7 @@ UA = (
 
 class InfoSearchAgent:
     def _ddg(self, query: str, max_results: int = 8) -> List[Dict]:
-        """DuckDuckGo search with a trusted-first strategy and a fallback."""
+        """DuckDuckGo search with a trusted-first strategy and a graceful fallback."""
         hits: List[Dict] = []
 
         def _pack(r: Dict) -> Optional[Dict]:
@@ -37,19 +50,18 @@ class InfoSearchAgent:
                 return None
             return {"title": title, "snippet": body, "url": url}
 
-        # 1) Try with trusted sites bias (site: filters)
+        # 1) Bias to trusted domains using site: filters
         trusted_query = (
             f"{query} (site:who.int OR site:cdc.gov OR site:nih.gov OR "
             f"site:medlineplus.gov OR site:mayoclinic.org OR site:cancer.gov OR site:nice.org.uk)"
         )
-
         with DDGS() as ddgs:
             for r in ddgs.text(trusted_query, max_results=max_results):
                 p = _pack(r)
                 if p:
                     hits.append(p)
 
-        # 2) If nothing, do a normal search then filter to trusted; if still nothing, keep top general results
+        # 2) If nothing: general search → filter to trusted; else keep top general
         if not hits:
             generic: List[Dict] = []
             with DDGS() as ddgs:
@@ -71,40 +83,25 @@ class InfoSearchAgent:
         except Exception as e:
             log.warning(f"Fetch failed for {url}: {e}")
             return ""
-
-        # Remove scripts/styles
         text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", html, flags=re.S | re.I)
-        # Strip tags
         text = re.sub(r"<[^>]+>", " ", text)
-        # Normalize whitespace
         text = re.sub(r"\s+", " ", text).strip()
-        # Keep it manageable
         return text[:20000]
 
     def _split_sents(self, text: str) -> List[str]:
-        # Simple sentence splitter
         sents = re.split(r"(?<=[.!?])\s+", text)
-        # Clean short/noisy ones
         return [s.strip() for s in sents if len(s.strip()) > 40]
 
     def _extract_bullets(self, text: str, query: str, fallback_snippet: str, title: str, url: str) -> Optional[str]:
-        """
-        Try to produce one concise bullet from page text that loosely matches the query;
-        fall back to the search snippet if page text is unusable.
-        """
+        """Make one concise bullet from page text; fallback to search snippet."""
         host = url.split("/")[2] if "://" in url else url
         if not text:
-            if fallback_snippet:
-                return f"- {title} ({host}): {fallback_snippet[:300]}"
-            return None
+            return f"- {title} ({host}): {fallback_snippet[:300]}" if fallback_snippet else None
 
-        sents = self._split_sents(text)[:80]  # first ~80 sentences is plenty
+        sents = self._split_sents(text)[:80]
         if not sents:
-            if fallback_snippet:
-                return f"- {title} ({host}): {fallback_snippet[:300]}"
-            return None
+            return f"- {title} ({host}): {fallback_snippet[:300]}" if fallback_snippet else None
 
-        # Score sentences by presence of query keywords (loose match); prefer earlier sentences
         q_tokens = [t for t in re.split(r"[^a-z0-9]+", query.lower()) if t and len(t) > 2]
         def score(sent: str) -> int:
             s = sent.lower()
@@ -112,18 +109,76 @@ class InfoSearchAgent:
 
         scored = sorted(((score(s), i, s) for i, s in enumerate(sents)), key=lambda x: (-x[0], x[1]))
         best_score, _, best_sent = scored[0]
-
-        # If keyword match is too weak, prefer snippet fallback to avoid irrelevant pull
         if best_score == 0 and fallback_snippet:
             return f"- {title} ({host}): {fallback_snippet[:300]}"
-
         return f"- {title} ({host}): {best_sent[:300]}"
 
-    def query(self, q: str) -> Dict:
-        results = self._ddg(q, max_results=8)
-        bullets: List[str] = []
-        pages: List[Dict] = []
+    # ---------- LLM summarization ----------
+    def _llm_summarize(self, query: str, pages: List[Dict], max_bullets: int = 5) -> List[str]:
+        """
+        Use OpenAI to synthesize 3–6 polished bullets with clear, source-cited statements.
+        Each bullet must name the source host in parentheses, e.g., (NIH), (CDC), (Mayo Clinic).
+        """
+        if not _openai_client:
+            return []
 
+        # Build compact context for the model
+        # Include per-source: title, host, short snippet of body OR the search snippet
+        items = []
+        for p in pages[:8]:
+            host = p["url"].split("/")[2] if "://" in p["url"] else p["url"]
+            body = p.get("body") or ""
+            snippet = (body[:1200] if body else (p.get("snippet") or ""))[:1200]
+            items.append(f"- {p['title']} ({host}) :: {snippet}")
+
+        context = "\n".join(items) if items else "No sources."
+        sys = (
+            "You are a cautious healthcare information summarizer for laypeople. "
+            "You DO NOT provide medical advice or instructions. "
+            "Summaries must be factual, neutral, and name sources."
+        )
+        user = (
+            "Task: Create concise, polished bullets (3–6) answering the user's query from the provided sources.\n"
+            "Rules:\n"
+            "• No medical advice or directives. High-level info only.\n"
+            "• Each bullet must include a source in parentheses, using the site/organization name, e.g., (WHO), (CDC), (NIH), (MedlinePlus), (Mayo Clinic), (NICE).\n"
+            "• Prefer reputable sources and avoid speculation.\n"
+            "• If evidence disagrees, note that briefly.\n"
+            f"User query: {query}\n\n"
+            f"Sources:\n{context}\n\n"
+            "Output format:\n"
+            "- Bullet 1 (Source)\n"
+            "- Bullet 2 (Source)\n"
+            "- Bullet N (Source)\n"
+        )
+
+        try:
+            resp = _openai_client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": sys},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.2,
+                max_tokens=600,
+            )
+            text = resp.choices[0].message.content.strip()
+        except Exception as e:
+            log.warning(f"LLM summarization failed: {e}")
+            return []
+
+        # Parse bullets (lines starting with dash)
+        bullets = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("- ")]
+        bullets = bullets[:max_bullets] if bullets else []
+        # Safety filter: keep reasonably short bullets
+        return [b[:350] for b in bullets if len(b) > 10]
+
+    # ---------- Public API ----------
+    def query(self, q: str, use_llm: bool = False) -> Dict:
+        results = self._ddg(q, max_results=8)
+
+        # Fetch pages
+        pages: List[Dict] = []
         for r in results:
             url = r["url"]
             title = r["title"]
@@ -131,6 +186,8 @@ class InfoSearchAgent:
             body = self._fetch(url)
             pages.append({"title": title, "url": url, "snippet": snippet, "body": body})
 
+        # Extractive bullets first (robust fallback)
+        bullets: List[str] = []
         for p in pages:
             bullet = self._extract_bullets(
                 text=p["body"],
@@ -144,10 +201,17 @@ class InfoSearchAgent:
             if len(bullets) >= 5:
                 break
 
-        # If still nothing, at least surface titles so the UI has something meaningful
+        # If enabled and key present, ask LLM to polish into source-cited bullets
+        if use_llm and _openai_client:
+            llm_bullets = self._llm_summarize(q, pages, max_bullets=5)
+            if llm_bullets:
+                bullets = llm_bullets
+
+        # Last-resort: surface titles/snippets
         if not bullets and results:
             for r in results[:3]:
                 host = r["url"].split("/")[2] if "://" in r["url"] else r["url"]
                 bullets.append(f"- {r['title']} ({host}): {r.get('snippet', '')[:300]}")
 
-        return {"query": q, "sources": results, "bullets": bullets}
+        return {"query": q, "sources": results, "bullets": bullets, "used_llm": bool(use_llm and _openai_client)}
+
