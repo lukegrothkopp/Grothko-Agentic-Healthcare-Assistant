@@ -1,27 +1,35 @@
-import os, json, pandas as pd
+# pages/3_Developer_Console.py
+import os
+import json
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+
 from generate_faiss_index import generate_index
 from utils.rag_pipeline import RAGPipeline
+from langchain_openai import ChatOpenAI
+from langchain.evaluation import load_evaluator
 
-load_dotenv()
+load_dotenv()  # for local .env
 
-# Map secrets -> env
+# Map Streamlit secrets -> environment (works on Cloud)
 for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
-    if k in st.secrets and st.secrets[k]:
+    if hasattr(st, "secrets") and k in st.secrets and st.secrets[k]:
         os.environ[k] = str(st.secrets[k]).strip()
 
 st.set_page_config(page_title="Developer Console", layout="wide")
 st.title("⚕️ Developer Console")
-
-# Gate with an admin code
-required = os.environ.get("ADMIN_TOKEN") or st.secrets.get("ADMIN_TOKEN", "")
-code = st.sidebar.text_input("Access code", type="password")
-if required and code.strip() != str(required).strip():
-    st.warning("Enter a valid admin access code to view this console.")
-    st.stop()
-
 st.caption("For ops, QA, indexing, and diagnostics. Not visible to patients/clinicians.")
+
+# ---- Simple access gating (only if configured) ----
+required = os.environ.get("ADMIN_TOKEN") or (st.secrets.get("ADMIN_TOKEN") if hasattr(st, "secrets") else "")
+if required:
+    code = st.sidebar.text_input("Access code", type="password")
+    if code.strip() != str(required).strip():
+        st.warning("Enter a valid admin access code to view this console.")
+        st.stop()
+else:
+    st.sidebar.info("No admin token configured — this page is open.")
 
 # ---- RAG index builder ----
 st.subheader("RAG Index")
@@ -47,26 +55,25 @@ probe_q = st.text_input(
     key="kb_probe_q",
 )
 if st.button("Retrieve top-3", key="kb_probe_btn"):
-    rag = RAGPipeline()
-    if not probe_q.strip():
-        st.info("Enter a query to retrieve.")
-    else:
+    try:
+        rag = RAGPipeline()
+        st.caption(
+            f"Backend in use: {getattr(rag, 'backend', 'unknown')} "
+            "(FAISS if OpenAI key + index present; TF-IDF otherwise)"
+        )
         pairs = rag.retrieve(probe_q, k=3)
-        st.caption(f"Backend in use: {getattr(rag, 'backend', 'unknown')} "
-                   f"(FAISS if OpenAI key + index present; TF-IDF otherwise)")
         if not pairs:
             st.info("No results from KB.")
         else:
             for i, (text, score) in enumerate(pairs, 1):
                 st.write(f"**{i}.** score={score:.4f}")
                 st.write(text[:1000] + ("…" if len(text) > 1000 else ""))
+    except Exception as e:
+        st.error(f"Probe failed: {e}")
 
-# ---- QA Eval (QAEvalChain) ----
+# ---- Q&A Eval (QAEvalChain) ----
 st.markdown("---")
 st.subheader("Q&A Eval (LLM-as-judge)")
-
-from langchain_openai import ChatOpenAI
-from langchain.evaluation import load_evaluator
 
 def _parse_jsonl(s: str):
     examples, predictions = [], []
@@ -87,12 +94,14 @@ def _f1_local(pred: str, gold: str) -> float:
     import re
     tok = lambda s: [w for w in re.findall(r"\w+", s.lower()) if w]
     p, g = set(tok(pred)), set(tok(gold))
-    if not p and not g: return 1.0
-    if not p or not g:  return 0.0
+    if not p and not g:
+        return 1.0
+    if not p or not g:
+        return 0.0
     tp = len(p & g)
     prec = tp / len(p) if p else 0.0
-    rec  = tp / len(g) if g else 0.0
-    return (2*prec*rec/(prec+rec)) if (prec+rec) else 0.0
+    rec = tp / len(g) if g else 0.0
+    return (2 * prec * rec / (prec + rec)) if (prec + rec) else 0.0
 
 def _local_eval_table(examples, predictions):
     rows = []
@@ -100,14 +109,18 @@ def _local_eval_table(examples, predictions):
         q, gold, pred = ex["query"], ex["answer"], pr["result"]
         score = _f1_local(pred or "", gold or "")
         rows.append({
-            "query": q, "prediction": pred, "gold": gold,
-            "score": round(score, 3), "why": "Local token F1 overlap (no LLM key)."
+            "query": q,
+            "prediction": pred,
+            "gold": gold,
+            "score": round(score, 3),
+            "why": "Local token F1 overlap (no LLM key)."
         })
     return rows
 
 uploaded = st.file_uploader("Upload JSONL (query, answer, result)", type=["jsonl"])
-use_llm = st.toggle("Use LLM judge (QAEvalChain)", value=os.getenv("OPENAI_API_KEY","").startswith("sk-"))
-model_name = st.text_input("LLM model", os.getenv("OPENAI_MODEL","gpt-4o-mini"))
+has_key = os.environ.get("OPENAI_API_KEY", "").strip().startswith("sk-")
+use_llm = st.toggle("Use LLM judge (QAEvalChain)", value=has_key)
+model_name = st.text_input("LLM model", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
 
 if uploaded is not None and st.button("Run Evaluation"):
     content = uploaded.read().decode("utf-8", errors="ignore")
@@ -119,7 +132,7 @@ if uploaded is not None and st.button("Run Evaluation"):
 
     rows = []
     with st.spinner("Scoring…"):
-        if use_llm and os.getenv("OPENAI_API_KEY","").startswith("sk-"):
+        if use_llm and has_key:
             try:
                 llm = ChatOpenAI(model=model_name, temperature=0)
                 evaluator = load_evaluator("qa", llm=llm)
@@ -128,8 +141,11 @@ if uploaded is not None and st.button("Run Evaluation"):
                     verdict = r.get("score") or r.get("label") or ""
                     why = (r.get("text") or "").strip()
                     rows.append({
-                        "query": ex["query"], "prediction": pr["result"], "gold": ex["answer"],
-                        "judgment": verdict, "why": why
+                        "query": ex["query"],
+                        "prediction": pr["result"],
+                        "gold": ex["answer"],
+                        "judgment": verdict,
+                        "why": why
                     })
             except Exception as e:
                 st.error(f"LLM eval failed: {e}")
@@ -156,6 +172,7 @@ if uploaded is not None and st.button("Run Evaluation"):
 st.markdown("---")
 st.subheader("Diagnostics")
 st.write({
-    "OPENAI key detected": os.environ.get("OPENAI_API_KEY","").startswith("sk-"),
+    "OPENAI key detected": has_key,
     "Model": os.environ.get("OPENAI_MODEL"),
+    "FAISS index exists": os.path.exists("vector_store/faiss_index.bin"),
 })
