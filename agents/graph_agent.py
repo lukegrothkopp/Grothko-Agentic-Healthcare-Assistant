@@ -105,8 +105,11 @@ def _make_booking_payload(user_text: str, fallback_pid: Optional[str]) -> str:
     payload = {"patient_id": pid, "doctor_name": doc, "appointment_date": date_iso}
     return json.dumps(payload)
 
+import os
+from langchain_openai import ChatOpenAI
+
 def build_graph(model_name: str = "gpt-4o-mini"):
-    llm = ChatOpenAI(model=model_name, temperature=0.1)
+    llm = ChatOpenAI(model=model_name, temperature=0.1, api_key=key) if has_key else none
     tools: List[Tool] = []
     search_tool = get_medical_search_tool()
     tools.append(search_tool)
