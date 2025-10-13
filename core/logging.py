@@ -1,20 +1,22 @@
-from __future__ import annotations
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Any
+import logging
+import os
 
-@dataclass
-class LogRecord:
-    step: str
-    detail: str
-    success: bool = True
-    meta: Dict[str, Any] = None
+_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-class RunLogger:
-    def __init__(self):
-        self.records: List[LogRecord] = []
+_formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
-    def log(self, step: str, detail: str, success: bool=True, meta: Dict[str, Any]=None):
-        self.records.append(LogRecord(step=step, detail=detail, success=success, meta=meta or {}))
+_logger = logging.getLogger("gha")
+_logger.setLevel(_LEVEL)
+if not _logger.handlers:
+    ch = logging.StreamHandler()
+    ch.setFormatter(_formatter)
+    _logger.addHandler(ch)
 
-    def to_dicts(self):
-        return [asdict(r) for r in self.records]
+
+def get_logger(name: str):
+    logger = _logger.getChild(name)
+    logger.setLevel(_LEVEL)
+    return logger
