@@ -1,11 +1,12 @@
-# Grothko-Agentic-Healthcare-Assistant
+# Grothko-Agentic-Healthcare-Assistant (Streamlit + LangChain + RAG)
 
-A practical starter to explore agentic patterns (planner → tool using agents) for healthcare admin workflows:
-- **BookingAgent**: mock doctor lookup + appointment booking (SQLite)
-- **HistoryAgent**: CRUD + summarization of patient histories
-- **InfoSearchAgent**: pulls trusted web info (DuckDuckGo fallback), extracts/cleans snippets, and summarizes
-- **MemoryStore**: lightweight TF IDF vector memory for patient context & prior answers (no API keys needed)
-- **Eval hooks**: quick plausibility checks and rubric scoring
+> ⚠️ **Disclaimer:** This app is for demonstrations and admin-style automation only.  
+> It does **not** provide medical advice, diagnosis, or treatment recommendations.
 
-
-⚠️ Disclaimer: This assistant is not medical advice and is intended only for demos and admin-style automation.
+This project is a clean, production-ready starter implementing an **agentic orchestrator** with modular tools:
+- **Booking tool** for appointment confirmations (mock).
+- **Record tools** to read/write a JSON "EHR".
+- **Search tool** for web lookups (SerpAPI if available, else DuckDuckGo fallback).
+- **RAG pipeline** over a local medical knowledge base (FAISS).
+- **Main agent** (LangChain) with memory and tools.
+- **Streamlit UI** with chat, sidebar patient context, and a safe system prompt.
