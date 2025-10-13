@@ -6,8 +6,12 @@ from agents.graph_agent import build_graph
 
 load_dotenv()
 
-st.set_page_config(page_title="Agentic Healthcare Assistant", layout="wide")
-st.title("👨‍⚕️ Agentic Healthcare Assistant — LangGraph Orchestration")
+for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "TAVILY_API_KEY"):
+    if k in st.secrets and st.secrets[k]:
+        os.environ[k] = str(st.secrets[k]).strip()
+        
+st.set_page_config(page_title="Grothko Agentic Healthcare Assistant", layout="wide")
+st.title("👨‍⚕️ Grothko Agentic Healthcare Assistant")
 st.caption("Not medical advice. High-level info & logistics only.")
 
 graph = build_graph(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
