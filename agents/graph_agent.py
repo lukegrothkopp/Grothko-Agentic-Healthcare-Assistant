@@ -182,7 +182,17 @@ def build_graph(model_name: str = "gpt-4o-mini"):
             state["messages"][-1],
             HumanMessage(content=state.get("result") or "No result."),
         ]
-        answer = llm.invoke(msgs).content
+        try:
+            if llm is None:
+                raise RuntimeError("No valid OPENAI_API_KEY")
+            answer = llm.invoke(msgs).content
+        except Exception:
+            # Graceful fallback: just bulletize the tool output
+            raw = state.get("result") or "No result."
+            lines = [ln.strip() for ln in (raw.splitlines() or [raw]) if ln.strip()]
+            bullets = [('- ' + ln) if not ln.startswith('-') else ln for ln in lines[:6]]
+            answer = "\n".join(bullets) if bullets else "- No result."
+    
         state["messages"].append(AIMessage(content=answer))
         return state
 
