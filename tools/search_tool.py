@@ -26,12 +26,10 @@ def _serp_search(query: str) -> str:
         return f"SerpAPI search failed: {e}"
 
 def medical_search(query: str) -> str:
-    """Search trusted medical sources; uses SerpAPI if configured, else DuckDuckGo."""
     if os.getenv("SERPAPI_API_KEY"):
         out = _serp_search(query)
         if out and not out.lower().startswith("serpapi search failed"):
             return out
-    # fallback
     return _ddg_search(query)
 
 def get_medical_search_tool() -> Tool:
