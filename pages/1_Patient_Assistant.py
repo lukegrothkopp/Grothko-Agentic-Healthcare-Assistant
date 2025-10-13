@@ -1,4 +1,3 @@
-# pages/1_Patient_Assistant.py
 import os, json
 import streamlit as st
 from langchain_core.messages import HumanMessage
