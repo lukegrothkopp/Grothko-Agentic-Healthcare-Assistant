@@ -1,4 +1,3 @@
-python
 """
 ChromaDB vector memory for patient summaries and retrieved medical info.
 Uses OpenAI embeddings if OPENAI_API_KEY is set; otherwise falls back to a naive keyword store.
