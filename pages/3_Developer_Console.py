@@ -24,6 +24,8 @@ st.set_page_config(page_title="Developer Console", layout="wide")
 st.title("⚕️ Developer Console")
 st.caption("For ops, QA, indexing, and diagnostics. Not visible to patients/clinicians.")
 
+graph = build_graph(model_name=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+
 # ---- Simple access gating (only if configured) ----
 required = os.environ.get("ADMIN_TOKEN") or (st.secrets.get("ADMIN_TOKEN") if hasattr(st, "secrets") else "")
 if required:
