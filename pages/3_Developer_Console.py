@@ -75,6 +75,67 @@ if st.button("Retrieve top-3", key="kb_probe_btn"):
     except Exception as e:
         st.error(f"Probe failed: {e}")
 
+# ---- Generate predictions with the current agent (fills 'result') ----
+st.markdown("---")
+st.subheader("Generate predictions for uploaded JSONLs")
+
+pred_files = st.file_uploader(
+    "Upload one or more JSONL files (fields: query, answer[, result])",
+    type=["jsonl"], accept_multiple_files=True, key="pred_files_uploader"
+)
+
+default_pid = st.text_input("Default patient_id to use (if not in query/JSON)", "patient_001")
+sandbox = st.toggle("Sandbox mode (avoid DB writes during predictions)", value=True)
+
+if pred_files and st.button("Generate predictions with agent"):
+    import io, zipfile
+    # optional: signal to tools not to persist during eval runs
+    if sandbox:
+        os.environ["EVAL_MODE"] = "1"
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as z:
+        for f in pred_files:
+            content = f.read().decode("utf-8", errors="ignore")
+            lines_out = []
+            for i, line in enumerate(content.splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except Exception as e:
+                    lines_out.append(json.dumps({
+                        "query": "", "answer": "",
+                        "result": f"[PARSE ERROR line {i}: {e}]"
+                    }))
+                    continue
+
+                q = item.get("query", "")
+                gold = item.get("answer", "")
+                pid = default_pid  # you could parse patient_XXX from q if desired
+
+                try:
+                    state = {"messages": [HumanMessage(content=q)],
+                             "intent": None, "result": None, "patient_id": pid}
+                    out = graph.invoke(state)
+                    pred = out["messages"][-1].content
+                except Exception as e:
+                    pred = f"[AGENT ERROR: {e}]"
+
+                lines_out.append(json.dumps({"query": q, "answer": gold, "result": pred}, ensure_ascii=False))
+
+            # write a predictions file next to the original name
+            safe_name = f.name.rsplit(".", 1)[0] + ".predictions.jsonl"
+            z.writestr(safe_name, "\n".join(lines_out))
+
+    st.download_button(
+        "Download predictions ZIP",
+        data=zip_buf.getvalue(),
+        file_name="predictions_jsonl.zip",
+        mime="application/zip",
+    )
+    st.success("Predictions generated. Upload the resulting .predictions.jsonl files to the Eval section.")
+
 # ---- Q&A Eval (LLM-as-judge) ----
 st.markdown("---")
 st.subheader("Q&A Eval (LLM-as-judge)")
