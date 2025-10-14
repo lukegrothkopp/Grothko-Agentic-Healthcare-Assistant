@@ -1,45 +1,51 @@
 # pages/3_Developer_Console.py
-import os
-import json
+import os, io, json, zipfile
 import pandas as pd
 import streamlit as st
-import io, zipfile
 from dotenv import load_dotenv
 
 from generate_faiss_index import generate_index
 from utils.rag_pipeline import RAGPipeline
 from langchain_openai import ChatOpenAI
 from langchain.evaluation import load_evaluator
-from agents.graph_agent import build_graph
-from langchain_core.messages import HumanMessage
 
-load_dotenv()  # for local .env
+load_dotenv()  # local .env
 
-# Map Streamlit secrets -> environment (works on Cloud)
+# Map Streamlit secrets -> env (Cloud)
 for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
-    if hasattr(st, "secrets") and k in st.secrets and st.secrets[k]:
-        os.environ[k] = str(st.secrets[k]).strip()
+    try:
+        v = st.secrets.get(k)
+        if v:
+            os.environ[k] = str(v).strip()
+    except Exception:
+        pass
+
+def _get_openai_key() -> str:
+    """Prefer Streamlit secrets; fall back to environment."""
+    try:
+        v = st.secrets.get("OPENAI_API_KEY")
+        if v:
+            return str(v).strip()
+    except Exception:
+        pass
+    return os.getenv("OPENAI_API_KEY", "").strip()
 
 st.set_page_config(page_title="Developer Console", layout="wide")
 st.title("⚕️ Developer Console")
 st.caption("For ops, QA, indexing, and diagnostics. Not visible to patients/clinicians.")
 
-graph = build_graph(model_name=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
-
-# ---- Simple access gating (only if configured) ----
-required = os.environ.get("ADMIN_TOKEN") or (st.secrets.get("ADMIN_TOKEN") if hasattr(st, "secrets") else "")
+# Optional access gating
+required = os.environ.get("ADMIN_TOKEN") or (getattr(st, "secrets", {}).get("ADMIN_TOKEN") if hasattr(st, "secrets") else "")
 if required:
     code = st.sidebar.text_input("Access code", type="password")
     if code.strip() != str(required).strip():
         st.warning("Enter a valid admin access code to view this console.")
         st.stop()
-else:
-    st.sidebar.info("No admin token configured — this page is open.")
 
 # ---- RAG index builder ----
 st.subheader("RAG Index")
 if st.button("Build FAISS index now"):
-    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    key = _get_openai_key()
     if not key.startswith("sk-"):
         st.warning("No valid OPENAI_API_KEY found; the app will use TF-IDF fallback.")
     else:
@@ -54,94 +60,30 @@ if st.button("Build FAISS index now"):
 st.markdown("---")
 st.subheader("Probe the local KB")
 
-probe_q = st.text_input(
-    "Test a query against the local medical KB",
-    "latest CKD treatments",
-    key="kb_probe_q",
-)
+probe_q = st.text_input("Test a query against the local medical KB", "latest CKD treatments", key="kb_probe_q")
 if st.button("Retrieve top-3", key="kb_probe_btn"):
     try:
         rag = RAGPipeline()
         backend = getattr(rag, "backend", "unknown")
-        is_faiss = backend == "openai"  # our RAG uses 'openai' when FAISS+embeddings is active
-
-        pairs = rag.retrieve(probe_q, k=3)
+        is_faiss = (backend == "openai")
         label = "distance (lower=better)" if is_faiss else "similarity (higher=better)"
         st.caption(f"Backend in use: {backend} — showing {label}")
 
-        for i, (text, score) in enumerate(pairs, 1):
-            st.write(f"**{i}.** {label.split()[0]}={score:.4f}")
-            st.write(text[:1000] + ("…" if len(text) > 1000 else ""))
+        pairs = rag.retrieve(probe_q, k=3)
+        if not pairs:
+            st.info("No results from KB.")
+        else:
+            for i, (text, score) in enumerate(pairs, 1):
+                st.write(f"**{i}.** {label.split()[0]}={score:.4f}")
+                st.write(text[:1000] + ("…" if len(text) > 1000 else ""))
     except Exception as e:
         st.error(f"Probe failed: {e}")
 
-# ---- Generate predictions with the current agent (fills 'result') ----
-st.markdown("---")
-st.subheader("Generate predictions for uploaded JSONLs")
-
-pred_files = st.file_uploader(
-    "Upload one or more JSONL files (fields: query, answer[, result])",
-    type=["jsonl"], accept_multiple_files=True, key="pred_files_uploader"
-)
-
-default_pid = st.text_input("Default patient_id to use (if not in query/JSON)", "patient_001")
-sandbox = st.toggle("Sandbox mode (avoid DB writes during predictions)", value=True)
-
-if pred_files and st.button("Generate predictions with agent"):
-    import io, zipfile
-    # optional: signal to tools not to persist during eval runs
-    if sandbox:
-        os.environ["EVAL_MODE"] = "1"
-
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w") as z:
-        for f in pred_files:
-            content = f.read().decode("utf-8", errors="ignore")
-            lines_out = []
-            for i, line in enumerate(content.splitlines(), 1):
-                if not line.strip():
-                    continue
-                try:
-                    item = json.loads(line)
-                except Exception as e:
-                    lines_out.append(json.dumps({
-                        "query": "", "answer": "",
-                        "result": f"[PARSE ERROR line {i}: {e}]"
-                    }))
-                    continue
-
-                q = item.get("query", "")
-                gold = item.get("answer", "")
-                pid = default_pid  # you could parse patient_XXX from q if desired
-
-                try:
-                    state = {"messages": [HumanMessage(content=q)],
-                             "intent": None, "result": None, "patient_id": pid}
-                    out = graph.invoke(state)
-                    pred = out["messages"][-1].content
-                except Exception as e:
-                    pred = f"[AGENT ERROR: {e}]"
-
-                lines_out.append(json.dumps({"query": q, "answer": gold, "result": pred}, ensure_ascii=False))
-
-            # write a predictions file next to the original name
-            safe_name = f.name.rsplit(".", 1)[0] + ".predictions.jsonl"
-            z.writestr(safe_name, "\n".join(lines_out))
-
-    st.download_button(
-        "Download predictions ZIP",
-        data=zip_buf.getvalue(),
-        file_name="predictions_jsonl.zip",
-        mime="application/zip",
-    )
-    st.success("Predictions generated. Upload the resulting .predictions.jsonl files to the Eval section.")
-
-# ---- Q&A Eval (LLM-as-judge) ----
+# ---- Q&A Eval (LLM-as-judge) with multi-file upload ----
 st.markdown("---")
 st.subheader("Q&A Eval (LLM-as-judge)")
 
 def _parse_jsonl(s: str):
-    import json
     examples, predictions = [], []
     for i, line in enumerate(s.splitlines()):
         if not line.strip():
@@ -179,43 +121,34 @@ def _local_eval_table(examples, predictions):
     return rows
 
 def _parse_many(uploaded_files):
-    """Return merged examples/preds with a __dataset label, plus per-dataset lists."""
     merged_ex, merged_pr = [], []
-    per_dataset = []  # list of (name, examples, predictions)
     for f in uploaded_files:
         content = f.read().decode("utf-8", errors="ignore")
         examples, predictions = _parse_jsonl(content)
-        per_dataset.append((f.name, examples, predictions))
         merged_ex.extend([dict(item, __dataset=f.name) for item in examples])
         merged_pr.extend([dict(item, __dataset=f.name) for item in predictions])
-    return merged_ex, merged_pr, per_dataset
+        f.seek(0)  # reset for reuse, if needed
+    return merged_ex, merged_pr
 
 uploaded_files = st.file_uploader(
     "Upload one or more JSONL files (fields: query, answer, result)",
-    type=["jsonl"],
-    accept_multiple_files=True,
+    type=["jsonl"], accept_multiple_files=True,
 )
 
-has_key = os.environ.get("OPENAI_API_KEY", "").strip().startswith("sk-")
+has_key = _get_openai_key().startswith("sk-")
 use_llm = st.toggle("Use LLM judge (QAEvalChain)", value=has_key)
 model_name = st.text_input("LLM model", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
 
 if uploaded_files and st.button("Run Evaluation"):
     try:
-        ex_all, pr_all, per_ds = _parse_many(uploaded_files)
+        ex_all, pr_all = _parse_many(uploaded_files)
     except Exception as e:
         st.error(f"Parse error: {e}")
-        st.stop()
-
-    if not ex_all:
-        st.info("No items found in uploaded files.")
         st.stop()
 
     rows = []
     with st.spinner("Scoring…"):
         if use_llm and has_key:
-            from langchain_openai import ChatOpenAI
-            from langchain.evaluation import load_evaluator
             try:
                 llm = ChatOpenAI(model=model_name, temperature=0)
                 evaluator = load_evaluator("qa", llm=llm)
@@ -231,24 +164,13 @@ if uploaded_files and st.button("Run Evaluation"):
                     })
             except Exception as e:
                 st.error(f"LLM eval failed: {e}")
-                use_llm = False  # fall back
-        if not use_llm:
-            # local fallback (F1)
-            rows = []
-            for ex, pr in zip(ex_all, pr_all):
-                q, gold, pred = ex["query"], ex["answer"], pr["result"]
-                score = _f1_local(pred or "", gold or "")
-                rows.append({
-                    "dataset": ex.get("__dataset", ""),
-                    "query": q, "prediction": pred, "gold": gold,
-                    "score": round(score, 3), "why": "Local token F1 overlap (no LLM key)."
-                })
+                rows = _local_eval_table(ex_all, pr_all)
+        else:
+            rows = _local_eval_table(ex_all, pr_all)
 
-    import pandas as pd
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, height=420)
 
-    # ---- Summaries: overall + per-dataset
     st.markdown("#### Summary")
     if "judgment" in df.columns:
         overall_correct = df["judgment"].astype(str).str.contains("CORRECT", case=False, na=False).mean()
@@ -261,42 +183,11 @@ if uploaded_files and st.button("Run Evaluation"):
         for name, sub in df.groupby("dataset"):
             st.write(f"- {name}: {sub['score'].mean():.3f}")
 
-    # ---- Downloads: combined CSV and ZIP (combined + per-dataset)
     st.download_button(
         "Download combined results (CSV)",
         data=df.to_csv(index=False).encode("utf-8"),
         file_name="qa_eval_results_combined.csv",
         mime="text/csv",
-    )
-
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("combined.csv", df.to_csv(index=False))
-        for name, sub in df.groupby("dataset"):
-            safe = name.replace("/", "_")
-            z.writestr(f"{safe}.csv", sub.to_csv(index=False))
-    st.download_button(
-        "Download all results (ZIP)",
-        data=zip_buf.getvalue(),
-        file_name="qa_eval_results_all.zip",
-        mime="application/zip",
-    )
-
-# (Optional) Offer a curated pack download if you keep JSONLs in data/eval_sets
-curated_dir = "data/eval_sets"
-if os.path.isdir(curated_dir):
-    st.markdown("##### Curated test pack")
-    pack = io.BytesIO()
-    with zipfile.ZipFile(pack, "w", zipfile.ZIP_DEFLATED) as z:
-        for fn in sorted(os.listdir(curated_dir)):
-            if fn.endswith(".jsonl"):
-                with open(os.path.join(curated_dir, fn), "rb") as f:
-                    z.writestr(fn, f.read())
-    st.download_button(
-        "Download curated test pack (.zip)",
-        data=pack.getvalue(),
-        file_name="eval_sets.zip",
-        mime="application/zip",
     )
 
 # ---- Diagnostics ----
@@ -307,3 +198,4 @@ st.write({
     "Model": os.environ.get("OPENAI_MODEL"),
     "FAISS index exists": os.path.exists("vector_store/faiss_index.bin"),
 })
+
