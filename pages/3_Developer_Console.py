@@ -70,11 +70,12 @@ if st.button("Retrieve top-3", key="kb_probe_btn"):
     except Exception as e:
         st.error(f"Probe failed: {e}")
 
-# ---- Q&A Eval (QAEvalChain) ----
+# ---- Q&A Eval (LLM-as-judge) ----
 st.markdown("---")
 st.subheader("Q&A Eval (LLM-as-judge)")
 
 def _parse_jsonl(s: str):
+    import json
     examples, predictions = [], []
     for i, line in enumerate(s.splitlines()):
         if not line.strip():
@@ -93,14 +94,12 @@ def _f1_local(pred: str, gold: str) -> float:
     import re
     tok = lambda s: [w for w in re.findall(r"\w+", s.lower()) if w]
     p, g = set(tok(pred)), set(tok(gold))
-    if not p and not g:
-        return 1.0
-    if not p or not g:
-        return 0.0
+    if not p and not g: return 1.0
+    if not p or not g:  return 0.0
     tp = len(p & g)
     prec = tp / len(p) if p else 0.0
-    rec = tp / len(g) if g else 0.0
-    return (2 * prec * rec / (prec + rec)) if (prec + rec) else 0.0
+    rec  = tp / len(g) if g else 0.0
+    return (2*prec*rec/(prec+rec)) if (prec+rec) else 0.0
 
 def _local_eval_table(examples, predictions):
     rows = []
@@ -108,63 +107,130 @@ def _local_eval_table(examples, predictions):
         q, gold, pred = ex["query"], ex["answer"], pr["result"]
         score = _f1_local(pred or "", gold or "")
         rows.append({
-            "query": q,
-            "prediction": pred,
-            "gold": gold,
-            "score": round(score, 3),
-            "why": "Local token F1 overlap (no LLM key)."
+            "query": q, "prediction": pred, "gold": gold,
+            "score": round(score, 3), "why": "Local token F1 overlap (no LLM key)."
         })
     return rows
 
-uploaded = st.file_uploader("Upload JSONL (query, answer, result)", type=["jsonl"])
+def _parse_many(uploaded_files):
+    """Return merged examples/preds with a __dataset label, plus per-dataset lists."""
+    merged_ex, merged_pr = [], []
+    per_dataset = []  # list of (name, examples, predictions)
+    for f in uploaded_files:
+        content = f.read().decode("utf-8", errors="ignore")
+        examples, predictions = _parse_jsonl(content)
+        per_dataset.append((f.name, examples, predictions))
+        merged_ex.extend([dict(item, __dataset=f.name) for item in examples])
+        merged_pr.extend([dict(item, __dataset=f.name) for item in predictions])
+    return merged_ex, merged_pr, per_dataset
+
+uploaded_files = st.file_uploader(
+    "Upload one or more JSONL files (fields: query, answer, result)",
+    type=["jsonl"],
+    accept_multiple_files=True,
+)
+
 has_key = os.environ.get("OPENAI_API_KEY", "").strip().startswith("sk-")
 use_llm = st.toggle("Use LLM judge (QAEvalChain)", value=has_key)
 model_name = st.text_input("LLM model", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
 
-if uploaded is not None and st.button("Run Evaluation"):
-    content = uploaded.read().decode("utf-8", errors="ignore")
+if uploaded_files and st.button("Run Evaluation"):
     try:
-        examples, predictions = _parse_jsonl(content)
+        ex_all, pr_all, per_ds = _parse_many(uploaded_files)
     except Exception as e:
         st.error(f"Parse error: {e}")
+        st.stop()
+
+    if not ex_all:
+        st.info("No items found in uploaded files.")
         st.stop()
 
     rows = []
     with st.spinner("Scoring…"):
         if use_llm and has_key:
+            from langchain_openai import ChatOpenAI
+            from langchain.evaluation import load_evaluator
             try:
                 llm = ChatOpenAI(model=model_name, temperature=0)
                 evaluator = load_evaluator("qa", llm=llm)
-                results = evaluator.evaluate(examples, predictions)
-                for ex, pr, r in zip(examples, predictions, results):
-                    verdict = r.get("score") or r.get("label") or ""
-                    why = (r.get("text") or "").strip()
+                results = evaluator.evaluate(ex_all, pr_all)
+                for ex, pr, r in zip(ex_all, pr_all, results):
                     rows.append({
+                        "dataset": ex.get("__dataset", ""),
                         "query": ex["query"],
                         "prediction": pr["result"],
                         "gold": ex["answer"],
-                        "judgment": verdict,
-                        "why": why
+                        "judgment": r.get("score") or r.get("label") or "",
+                        "why": (r.get("text") or "").strip(),
                     })
             except Exception as e:
                 st.error(f"LLM eval failed: {e}")
-                rows = _local_eval_table(examples, predictions)
-        else:
-            rows = _local_eval_table(examples, predictions)
+                use_llm = False  # fall back
+        if not use_llm:
+            # local fallback (F1)
+            rows = []
+            for ex, pr in zip(ex_all, pr_all):
+                q, gold, pred = ex["query"], ex["answer"], pr["result"]
+                score = _f1_local(pred or "", gold or "")
+                rows.append({
+                    "dataset": ex.get("__dataset", ""),
+                    "query": q, "prediction": pred, "gold": gold,
+                    "score": round(score, 3), "why": "Local token F1 overlap (no LLM key)."
+                })
 
+    import pandas as pd
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, height=400)
-    if "judgment" in df.columns:
-        correct = df["judgment"].astype(str).str.contains("CORRECT", case=False, na=False).sum()
-        st.write(f"**Judged CORRECT:** {correct}/{len(df)}")
-    elif "score" in df.columns:
-        st.write(f"**Avg F1:** {df['score'].mean():.3f}")
+    st.dataframe(df, use_container_width=True, height=420)
 
+    # ---- Summaries: overall + per-dataset
+    st.markdown("#### Summary")
+    if "judgment" in df.columns:
+        overall_correct = df["judgment"].astype(str).str.contains("CORRECT", case=False, na=False).mean()
+        st.write(f"**Overall CORRECT rate:** {overall_correct:.3f}")
+        for name, sub in df.groupby("dataset"):
+            rate = sub["judgment"].astype(str).str.contains("CORRECT", case=False, na=False).mean()
+            st.write(f"- {name}: {rate:.3f}")
+    elif "score" in df.columns:
+        st.write(f"**Overall Avg F1:** {df['score'].mean():.3f}")
+        for name, sub in df.groupby("dataset"):
+            st.write(f"- {name}: {sub['score'].mean():.3f}")
+
+    # ---- Downloads: combined CSV and ZIP (combined + per-dataset)
     st.download_button(
-        "Download results (CSV)",
+        "Download combined results (CSV)",
         data=df.to_csv(index=False).encode("utf-8"),
-        file_name="qa_eval_results.csv",
+        file_name="qa_eval_results_combined.csv",
         mime="text/csv",
+    )
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("combined.csv", df.to_csv(index=False))
+        for name, sub in df.groupby("dataset"):
+            safe = name.replace("/", "_")
+            z.writestr(f"{safe}.csv", sub.to_csv(index=False))
+    st.download_button(
+        "Download all results (ZIP)",
+        data=zip_buf.getvalue(),
+        file_name="qa_eval_results_all.zip",
+        mime="application/zip",
+    )
+
+# (Optional) Offer a curated pack download if you keep JSONLs in data/eval_sets
+curated_dir = "data/eval_sets"
+if os.path.isdir(curated_dir):
+    st.markdown("##### Curated test pack")
+    pack = io.BytesIO()
+    with zipfile.ZipFile(pack, "w", zipfile.ZIP_DEFLATED) as z:
+        for fn in sorted(os.listdir(curated_dir)):
+            if fn.endswith(".jsonl"):
+                with open(os.path.join(curated_dir, fn), "rb") as f:
+                    z.writestr(fn, f.read())
+    st.download_button(
+        "Download curated test pack (.zip)",
+        data=pack.getvalue(),
+        file_name="eval_sets.zip",
+        mime="application/zip",
     )
 
 # ---- Diagnostics ----
