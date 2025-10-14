@@ -10,6 +10,8 @@ from generate_faiss_index import generate_index
 from utils.rag_pipeline import RAGPipeline
 from langchain_openai import ChatOpenAI
 from langchain.evaluation import load_evaluator
+from agents.graph_agent import build_graph
+from langchain_core.messages import HumanMessage
 
 load_dotenv()  # for local .env
 
