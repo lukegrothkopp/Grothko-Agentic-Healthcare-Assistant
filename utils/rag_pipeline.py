@@ -1,107 +1,70 @@
 import os, glob
-from typing import List, Tuple
 import numpy as np
 
+# If FAISS index is present + OpenAI key, use that; else TF-IDF fallback.
 class RAGPipeline:
-    """
-    Prefers OpenAI embeddings + FAISS if OPENAI_API_KEY is present.
-    Falls back to a lightweight TF-IDF retriever (no network) when no key is set.
-    """
-    def __init__(self, kb_dir: str = "data/medical_kb", index_path: str = "vector_store/faiss_index.bin"):
-        self.kb_dir = kb_dir
-        self.index_path = index_path
-        self.backend = "openai" if os.getenv("OPENAI_API_KEY") else "tfidf"
-        self.docs: List[str] = []
+    def __init__(self, medical_kb_path: str = "data/medical_kb"):
+        self.kb_path = medical_kb_path
+        self.backend = "tfidf"
+        self._init_backend()
 
-        if self.backend == "openai":
+    def _init_backend(self):
+        # Prefer FAISS if index and key exist
+        key = os.getenv("OPENAI_API_KEY", "").strip()
+        has_faiss = os.path.exists("vector_store/faiss_index.bin")
+        if key.startswith("sk-") and has_faiss:
             try:
-                import faiss  # type: ignore
+                import faiss
                 from langchain_openai import OpenAIEmbeddings
-                self.faiss = faiss
-                self.emb = OpenAIEmbeddings()
-                self.index = None
-                self._load_or_build_faiss()
-            except Exception:
-                # If anything fails (e.g., no key), drop to TF-IDF
-                self.backend = "tfidf"
-                self._build_tfidf()
-        else:
-            self._build_tfidf()
-
-    # ---------- OpenAI + FAISS path ----------
-    def _load_or_build_faiss(self):
-        if os.path.exists(self.index_path) and os.path.getsize(self.index_path) > 0:
-            try:
-                self.index = self.faiss.read_index(self.index_path)
-                docs_path = self.index_path + ".docs.txt"
-                if os.path.exists(docs_path):
-                    with open(docs_path, "r", encoding="utf-8") as f:
-                        self.docs = [line.rstrip("\n") for line in f]
+                self.emb = OpenAIEmbeddings(api_key=key)
+                self.index = faiss.read_index("vector_store/faiss_index.bin")
+                self.docs = self._load_docs_for_faiss_labels()
+                self.backend = "openai"  # signals FAISS+embeddings
                 return
             except Exception:
                 pass
-        self._build_from_kb_faiss()
-
-    def _build_from_kb_faiss(self):
-        texts: List[str] = []
-        for fp in glob.glob(os.path.join(self.kb_dir, "*.txt")):
-            with open(fp, "r", encoding="utf-8") as f:
-                txt = f.read().strip()
-                if txt:
-                    texts.append(txt)
-        if not texts:
-            self.index = None
-            self.docs = []
-            return
-        vecs = self.emb.embed_documents(texts)
-        mat = np.array(vecs, dtype=np.float32)
-        dim = mat.shape[1]
-        index = self.faiss.IndexFlatL2(dim)
-        index.add(mat)
-        os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
-        self.faiss.write_index(index, self.index_path)
-        with open(self.index_path + ".docs.txt", "w", encoding="utf-8") as f:
-            for t in texts:
-                f.write(t.replace("\n", " ") + "\n")
-        self.index = index
-        self.docs = [t.replace("\n", " ") for t in texts]
-
-    # ---------- TF-IDF fallback ----------
-    def _build_tfidf(self):
+        # Fallback: TF-IDF
         from sklearn.feature_extraction.text import TfidfVectorizer
-        from sklearn.metrics.pairwise import cosine_similarity
-        self.TfidfVectorizer = TfidfVectorizer
-        self.cosine_similarity = cosine_similarity
-        texts: List[str] = []
-        for fp in glob.glob(os.path.join(self.kb_dir, "*.txt")):
-            with open(fp, "r", encoding="utf-8") as f:
-                txt = f.read().strip()
-                if txt:
-                    texts.append(txt)
-        self.docs = [t.replace("\n", " ") for t in texts]
-        if not self.docs:
-            self.vec = None
-            self.mat = None
-            return
-        self.vec = self.TfidfVectorizer(stop_words="english").fit(self.docs)
-        self.mat = self.vec.transform(self.docs)
+        self.vectorizer = TfidfVectorizer(stop_words="english")
+        self.texts = self._load_all_texts()
+        self.mat = self.vectorizer.fit_transform(self.texts) if self.texts else None
+        self.backend = "tfidf"
 
-    def is_ready(self) -> bool:
+    def _load_all_texts(self):
+        texts = []
+        for fp in glob.glob(os.path.join(self.kb_path, "*.txt")):
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    texts.append(f.read())
+            except Exception:
+                continue
+        return texts
+
+    def _load_docs_for_faiss_labels(self):
+        # optional: show doc lines alongside FAISS output (for developer probe UI)
+        docs_txt = "vector_store/faiss_index.bin.docs.txt"
+        if os.path.exists(docs_txt):
+            with open(docs_txt, "r", encoding="utf-8") as f:
+                return [line.strip() for line in f.readlines()]
+        # fallback to KB texts
+        return self._load_all_texts()
+
+    def retrieve(self, query: str, k: int = 3):
         if self.backend == "openai":
-            return self.index is not None and len(self.docs) > 0
-        return self.mat is not None and len(self.docs) > 0
+            # FAISS distance: smaller is better
+            qv = self.emb.embed_query(query)
+            D, I = self.index.search(np.array([qv], dtype=np.float32), k)
+            out = []
+            for dist, idx in zip(D[0], I[0]):
+                if idx < 0 or idx >= len(self.docs): 
+                    continue
+                out.append((self.docs[idx], float(dist)))
+            return out
 
-    def retrieve(self, query: str, k: int = 3) -> List[Tuple[str, float]]:
-        if not self.is_ready():
+        # TF-IDF cosine similarity: larger is better
+        if not getattr(self, "mat", None) or self.mat.shape[0] == 0:
             return []
-        if self.backend == "openai":
-            qv = np.array([self.emb.embed_query(query)], dtype=np.float32)
-            D, I = self.index.search(qv, min(k, len(self.docs)))
-            idxs = I[0].tolist()
-            ds = D[0].tolist()
-            return [(self.docs[i], float(ds[j])) for j, i in enumerate(idxs)]
-        # TF-IDF
-        qv = self.vec.transform([query])
-        sims = self.cosine_similarity(qv, self.mat)[0]
-        idxs = sims.argsort()[::-1][:min(k, len(self.docs))]
-        return [(self.docs[i], float(sims[i])) for i in idxs]
+        qv = self.vectorizer.transform([query])
+        sims = (self.mat @ qv.T).toarray().ravel()
+        idxs = sims.argsort()[::-1][:k]
+        return [(self.texts[i], float(sims[i])) for i in idxs if sims[i] > 0.0]
