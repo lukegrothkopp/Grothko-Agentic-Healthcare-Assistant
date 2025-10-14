@@ -3,6 +3,7 @@ import os
 import json
 import pandas as pd
 import streamlit as st
+import io, zipfile
 from dotenv import load_dotenv
 
 from generate_faiss_index import generate_index
