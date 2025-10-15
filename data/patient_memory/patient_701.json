@@ -1,0 +1,130 @@
+{
+  "patient_id": "patient_701",
+  "profile": {
+    "full_name": "Harold \"Hal\" Bennett",
+    "dob": "1955-03-14",
+    "age": 70,
+    "sex": "male",
+    "contact": { "phone": "(555) 014-7701", "email": "hal.bennett@example.com" },
+    "address": "123 Lakeview Ave, Seattle, WA 98101",
+    "emergency_contact": { "name": "Linda Bennett", "relation": "spouse", "phone": "(555) 014-7702" }
+  },
+  "allergies": [
+    { "substance": "Lisinopril", "reaction": "cough" },
+    { "substance": "NKDA", "reaction": "none (otherwise)" }
+  ],
+  "problems": [
+    { "name": "Chronic kidney disease, stage 4 (eGFR ~26)", "codes": { "icd10": "N18.4" }, "status": "active", "since": "2024-03-01", "notes": "Diabetic and hypertensive nephropathy suspected. Albuminuric." },
+    { "name": "Hypertension", "codes": { "icd10": "I10" }, "status": "active", "since": "2005-01-01" },
+    { "name": "Type 2 diabetes mellitus", "codes": { "icd10": "E11.9" }, "status": "active", "since": "2010-01-01" },
+    { "name": "Hyperlipidemia", "codes": { "icd10": "E78.5" }, "status": "active" },
+    { "name": "Anemia of CKD", "codes": { "icd10": "D63.1" }, "status": "active" },
+    { "name": "BPH with nocturia", "codes": { "icd10": "N40.1" }, "status": "active" },
+    { "name": "Osteoarthritis (knees)", "codes": { "icd10": "M17.9" }, "status": "active" }
+  ],
+  "medications": [
+    { "name": "Losartan", "dose": "50 mg", "route": "PO", "frequency": "daily", "status": "active" },
+    { "name": "Amlodipine", "dose": "5 mg", "route": "PO", "frequency": "daily", "status": "active" },
+    { "name": "Empagliflozin", "dose": "10 mg", "route": "PO", "frequency": "daily", "status": "active" },
+    { "name": "Metformin", "dose": "500 mg", "route": "PO", "frequency": "BID", "status": "held", "notes": "Held pending nephrology due to low eGFR" },
+    { "name": "Atorvastatin", "dose": "20 mg", "route": "PO", "frequency": "nightly", "status": "active" },
+    { "name": "Tamsulosin", "dose": "0.4 mg", "route": "PO", "frequency": "nightly", "status": "active" },
+    { "name": "Aspirin", "dose": "81 mg", "route": "PO", "frequency": "daily", "status": "active" },
+    { "name": "Acetaminophen", "dose": "500 mg", "route": "PO", "frequency": "PRN", "status": "as_needed", "notes": "For knee pain; avoids NSAIDs" }
+  ],
+  "vitals": [
+    { "date": "2025-10-10", "bp": "148/82", "hr_bpm": 74, "temp_c": 36.7, "weight_kg": 86, "bmi": 28.1 }
+  ],
+  "labs": [
+    {
+      "date": "2025-10-10",
+      "values": {
+        "creatinine_mg_dL": 2.6,
+        "egfr_mL_min_1.73m2": 26,
+        "bun_mg_dL": 43,
+        "potassium_mmol_L": 5.2,
+        "sodium_mmol_L": 139,
+        "co2_bicarb_mmol_L": 20,
+        "calcium_mg_dL": 8.6,
+        "phosphate_mg_dL": 4.9,
+        "albumin_g_dL": 3.6,
+        "urine_acr_mg_g": 420,
+        "ua_summary": "2+ protein, no blood",
+        "hemoglobin_g_dL": 10.8,
+        "hematocrit_percent": 33,
+        "a1c_percent": 7.6,
+        "lipids": { "ldl": 86, "hdl": 43, "triglycerides": 158 }
+      }
+    }
+  ],
+  "lab_trends": [
+    { "date": "2024-04-01", "creatinine_mg_dL": 1.9, "egfr_mL_min_1.73m2": 38 },
+    { "date": "2025-03-01", "creatinine_mg_dL": 2.3, "egfr_mL_min_1.73m2": 32 },
+    { "date": "2025-10-10", "creatinine_mg_dL": 2.6, "egfr_mL_min_1.73m2": 26 }
+  ],
+  "imaging": [
+    { "date": "2025-09-01", "modality": "Ultrasound (renal)", "result": "Bilateral kidneys 9.2–9.5 cm, increased cortical echogenicity, preserved corticomedullary differentiation, no hydronephrosis; small simple right renal cyst." }
+  ],
+  "care_team": {
+    "pcp": { "name": "Dr. Samuel Ortiz", "clinic": "Lakeside Primary Care", "phone": "(555) 014-7710" },
+    "preferred_specialist": { "specialty": "Nephrology", "suggested_name": "Dr. Jane Lee" }
+  },
+  "preferences": {
+    "appointment_modes": ["video", "in-person"],
+    "preferred_clinic": "North Clinic",
+    "preferred_time_of_day": "morning",
+    "appointment_window_days": 14
+  },
+  "summary": "70-year-old male with CKD stage 4 (albuminuric) due to long-standing HTN and T2DM; suboptimal BP control; A1c 7.6%. Anemia of CKD, mild hyperkalemia, metabolic acidosis. Seeks nephrology appointment at North Clinic, video or in-person, morning preferred, within next 1–2 weeks.",
+  "entries": [
+    {
+      "ts": "2025-10-10T09:15:00-07:00",
+      "type": "summary",
+      "text": "CKD stage 4 with albuminuria (eGFR ~26). HTN and T2DM long-standing. A1c 7.6%. Anemia of CKD, mild hyperkalemia, metabolic acidosis. Prefers North Clinic; mornings; video or in-person.",
+      "meta": { "priority": "routine-urgent", "source": "PCP handoff" }
+    },
+    {
+      "ts": "2025-10-10T09:20:00-07:00",
+      "type": "labs",
+      "text": "Labs 2025-10-10: Cr 2.6 mg/dL; eGFR 26; BUN 43; K 5.2; CO2 20; Phos 4.9; ACR 420 mg/g; Hgb 10.8; A1c 7.6; UA 2+ protein no blood.",
+      "meta": { "facility": "Lakeside Lab" }
+    },
+    {
+      "ts": "2025-09-01T14:00:00-07:00",
+      "type": "imaging",
+      "text": "Renal US: small echogenic kidneys, no hydronephrosis; simple right renal cyst.",
+      "meta": { "facility": "City Imaging Center" }
+    },
+    {
+      "ts": "2025-10-15T10:05:00-07:00",
+      "type": "booking_request",
+      "text": "Book nephrology within 1–2 weeks at North Clinic; mornings; video or in-person accepted.",
+      "meta": {
+        "doctor_specialty": "Nephrologist",
+        "doctor_name_hint": "Dr. Jane Lee",
+        "clinic": "North Clinic",
+        "modes": ["video", "in-person"],
+        "preferred_time_of_day": "morning",
+        "date_range": { "start": "2025-10-16", "end": "2025-10-29" }
+      }
+    },
+    {
+      "ts": "2025-10-15T10:06:00-07:00",
+      "type": "kb_hint",
+      "text": "Topics: BP targets (KDIGO), ACEi/ARB, SGLT2 inhibitors, finerenone for albuminuria, sodium/protein moderation, metabolic acidosis (oral bicarbonate), anemia of CKD (iron, ESA), hyperkalemia (patiromer/SZC), phosphate control/binders.",
+      "meta": {
+        "query_suggestions": [
+          "chronic kidney disease treatment options KDIGO",
+          "SGLT2 inhibitors CKD 2024 guideline",
+          "finerenone albuminuric CKD outcomes",
+          "blood pressure targets CKD KDIGO 2021",
+          "anemia of CKD ESA iron therapy",
+          "hyperkalemia CKD patiromer sodium zirconium",
+          "metabolic acidosis CKD oral bicarbonate",
+          "phosphate binders CKD non-dialysis"
+        ]
+      }
+    }
+  ],
+  "last_updated": "2025-10-15T10:15:00-07:00"
+}
