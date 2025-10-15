@@ -7,13 +7,7 @@ from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage, AIMessage
 from agents.graph_agent import build_graph
-
-# --- robust import & reload to avoid stale class versions in Streamlit ---
-from importlib import reload
-import utils.patient_memory as _pm_mod
-reload(_pm_mod)  # ensure we see latest PatientMemory implementation
 from utils.patient_memory import PatientMemory
-
 from tools.booking_tool import get_booking_tool
 
 load_dotenv()
@@ -22,11 +16,10 @@ st.set_page_config(page_title="Patient Assistant", layout="wide")
 st.title("🩺 Patient Assistant")
 st.caption("Ask for help with scheduling, records, and general info from trusted sources. (No medical advice.)")
 
-# --- Singletons (defensively create or refresh if missing methods) ---
+# --- Singletons ---
 if "graph" not in st.session_state:
     st.session_state.graph = build_graph()  # works with/without OPENAI key
-if "pmemory" not in st.session_state or not hasattr(st.session_state.get("pmemory"), "add_message"):
-    # Recreate memory if it's missing the legacy-compatible add_message shim
+if "pmemory" not in st.session_state:
     st.session_state.pmemory = PatientMemory()
 if "booking_tool" not in st.session_state:
     st.session_state.booking_tool = get_booking_tool()
@@ -35,16 +28,19 @@ graph = st.session_state.graph
 mem = st.session_state.pmemory
 booking_tool = st.session_state.booking_tool
 
-def _safe_log(pid: str, role: str, content: str):
-    """Log to PatientMemory regardless of whether add_message exists."""
-    pid = pid or "session"
+# --- Safe logging wrapper (handles both old/new PatientMemory) ---
+def _safe_log(mem_obj: PatientMemory, pid: str, role: str, content: str):
     try:
-        if hasattr(mem, "add_message"):
-            mem.add_message(pid, role, content)
-        else:
-            mem.record_event(pid, f"[{role}] {content}", meta={"role": role})
+        fn = getattr(mem_obj, "add_message", None)
+        if callable(fn):
+            fn(pid or "session", role, content)
+            return
+        # Fallback to record_event if add_message doesn't exist
+        fn2 = getattr(mem_obj, "record_event", None)
+        if callable(fn2):
+            fn2(pid or "session", f"[{role}] {content}", meta={"role": role})
     except Exception:
-        # Don't crash UI if logging fails
+        # Don't let logging failures break UX
         pass
 
 # --- Tabs ---
@@ -74,8 +70,11 @@ with tab_general:
     if run_btn and prompt.strip():
         # Resolve patient id from free text (Hal/Marisol/Ethan if their seeds are present)
         pid = mem.resolve_from_text(prompt) or "session"
-        _safe_log(pid, "user", prompt)
 
+        # Log user message safely
+        _safe_log(mem, pid, "user", prompt)
+
+        # Run the agent graph
         try:
             state_in = {"messages": [HumanMessage(content=prompt)], "patient_id": pid}
             state_out = graph.invoke(state_in)
@@ -90,12 +89,15 @@ with tab_general:
             if not assistant_text:
                 assistant_text = state_out.get("result", "") or "(no result returned)"
 
-            _safe_log(pid, "assistant", assistant_text)
+            # Log assistant message safely
+            _safe_log(mem, pid, "assistant", assistant_text)
+
+            # UI
             st.session_state.last_response_general = assistant_text
             st.session_state.last_patient_general = pid
-
             st.success(f"Resolved patient: {pid}")
             st.write(assistant_text)
+
         except Exception as e:
             st.error(f"Run failed: {e}")
 
@@ -113,24 +115,28 @@ with tab_schedule:
 
     # Load patients for dropdown
     patients = mem.list_patients()
-    patient_ids = [p["patient_id"] for p in patients] if patients else []
-    pretty_labels = [f'{p["patient_id"]} — {p.get("name","") or "(no name)"}' for p in patients] if patients else []
-
     if not patients:
         st.info(
             "No patients loaded. Add seed files to OFFLINE_PATIENT_DIR (default: data/patient_memory) "
             "or use the Developer Console → Patient Seeds to import JSON."
         )
 
-    sel_ix = 0 if patients else None
+    pretty_labels = [
+        f'{p["patient_id"]} — {p.get("name","") or "(no name)"}'
+        for p in patients
+    ] if patients else ["(none)"]
+
+    sel_ix = 0 if patients else 0
     sel_label = st.selectbox(
         "Patient",
-        options=pretty_labels if patients else ["(none)"],
-        index=sel_ix if patients else 0,
+        options=pretty_labels,
+        index=sel_ix,
         disabled=not patients,
         key="sched_patient_label",
     )
-    pid = patients[pretty_labels.index(sel_label)]["patient_id"] if patients else None
+    pid = None
+    if patients:
+        pid = patients[pretty_labels.index(sel_label)]["patient_id"]
 
     # Pull booking hints from memory (clinic/modes/time window)
     hints = mem.booking_hints(pid) if pid else {}
@@ -190,8 +196,8 @@ with tab_schedule:
             result_str = result if isinstance(result, str) else json.dumps(result)
             st.success("Booking request sent.")
             st.code(result_str, language="json")
-            _safe_log(pid, "user", f"[QuickSchedule] {json.dumps(payload)}")
-            _safe_log(pid, "assistant", f"[QuickSchedule Result] {result_str}")
+            _safe_log(mem, pid, "user", f"[QuickSchedule] {json.dumps(payload)}")
+            _safe_log(mem, pid, "assistant", f"[QuickSchedule Result] {result_str}")
         except Exception as e:
             st.error(f"Booking failed: {e}")
 
@@ -200,5 +206,4 @@ with st.expander("Technical details"):
     st.write({
         "OFFLINE_PATIENT_DIR": os.getenv("OFFLINE_PATIENT_DIR", "data/patient_memory"),
         "Patients loaded": len(mem.patients),
-        "PatientMemory_has_add_message": hasattr(mem, "add_message"),
     })
