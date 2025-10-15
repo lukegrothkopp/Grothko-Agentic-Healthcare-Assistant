@@ -1,7 +1,11 @@
 # pages/1_Patient_Assistant.py
+from __future__ import annotations
+
 import os
+import re
 import json
-from datetime import date
+import uuid
+from datetime import date, datetime
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -25,7 +29,7 @@ if "booking_tool" not in st.session_state:
     st.session_state.booking_tool = get_booking_tool()
 
 graph = st.session_state.graph
-mem = st.session_state.pmemory
+mem: PatientMemory = st.session_state.pmemory
 booking_tool = st.session_state.booking_tool
 
 # --- Safe logging wrapper (handles both old/new PatientMemory) ---
@@ -35,13 +39,124 @@ def _safe_log(mem_obj: PatientMemory, pid: str, role: str, content: str):
         if callable(fn):
             fn(pid or "session", role, content)
             return
-        # Fallback to record_event if add_message doesn't exist
         fn2 = getattr(mem_obj, "record_event", None)
         if callable(fn2):
             fn2(pid or "session", f"[{role}] {content}", meta={"role": role})
     except Exception:
-        # Don't let logging failures break UX
         pass
+
+# --- Helpers for Quick Schedule ---
+def _norm_name(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+def _find_patient_id_by_name(mem_obj: PatientMemory, full_name: str) -> str | None:
+    target = _norm_name(full_name)
+    for pid, data in (mem_obj.patients or {}).items():
+        name = _norm_name(((data.get("profile") or {}).get("full_name") or ""))
+        if name and name == target:
+            return pid
+    return None
+
+_PAT_ID_RE = re.compile(r"^patient_(\d+)$")
+def _next_patient_id(mem_obj: PatientMemory) -> str:
+    max_n = 700  # start near our examples
+    for pid in (mem_obj.patients or {}):
+        m = _PAT_ID_RE.match(pid)
+        if m:
+            try:
+                max_n = max(max_n, int(m.group(1)))
+            except Exception:
+                continue
+    return f"patient_{max_n + 1}"
+
+def _maybe_int_age(dob: date | None, fallback: int | None) -> int | None:
+    if isinstance(dob, date):
+        today = date.today()
+        years = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+        return max(0, years)
+    return fallback if (isinstance(fallback, int) and fallback >= 0) else None
+
+def _ensure_patient_from_form(
+    mem_obj: PatientMemory,
+    full_name: str | None,
+    dob: date | None,
+    age_input: int | None,
+    sex: str | None,
+    phone: str | None,
+    email: str | None,
+    address: str | None,
+    prefs: dict | None,
+    booking_meta: dict | None,
+    reason: str | None,
+) -> str:
+    """
+    If name matches an existing patient (case-insensitive), update optional fields and return pid.
+    Otherwise create a new patient JSON (saved into OFFLINE_PATIENT_DIR) and return the new pid.
+    """
+    full_name = (full_name or "").strip()
+    pid = _find_patient_id_by_name(mem_obj, full_name) if full_name else None
+
+    # Prepare profile fields
+    age_val = _maybe_int_age(dob, age_input)
+    profile = {
+        "full_name": full_name or (pid or "New Patient"),
+        "dob": dob.isoformat() if isinstance(dob, date) else None,
+        "age": age_val,
+        "sex": (sex or "").lower() if sex else None,
+        "contact": {"phone": (phone or "").strip() or None, "email": (email or "").strip() or None},
+        "address": (address or "").strip() or None,
+    }
+    # clean None keys in contact
+    profile["contact"] = {k: v for k, v in profile["contact"].items() if v}
+    profile = {k: v for k, v in profile.items() if v is not None}
+
+    if pid:
+        # Update existing (non-destructive merge)
+        data = mem_obj.get(pid) or {"patient_id": pid}
+        prof = data.get("profile") or {}
+        prof.update(profile)
+        data["profile"] = prof
+        # preferences
+        if prefs:
+            data.setdefault("preferences", {}).update({k: v for k, v in prefs.items() if v})
+        # optional summary tweak
+        if reason and not data.get("summary"):
+            data["summary"] = f"{prof.get('age','')} {prof.get('sex','')} — reason: {reason[:120]}"
+        # add booking_request entry for traceability
+        if booking_meta:
+            entries = data.setdefault("entries", [])
+            entries.append({
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "type": "booking_request",
+                "text": f"Booking request: {reason or '(no reason provided)'}",
+                "meta": booking_meta,
+            })
+        mem_obj.save_patient_json(data)  # persists + updates in-memory
+        return pid
+
+    # Create new patient
+    new_pid = _next_patient_id(mem_obj)
+    new_record = {
+        "patient_id": new_pid,
+        "profile": profile,
+        "preferences": prefs or {},
+        "summary": (f"{profile.get('age','')} {profile.get('sex','')} — "
+                    f"{(reason or 'new appointment').strip()}").strip(),
+        "problems": [
+            {"name": (reason or "Visit request"), "status": "active"}
+        ] if reason else [],
+        "entries": []
+    }
+    if booking_meta:
+        new_record["entries"].append({
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "type": "booking_request",
+            "text": f"Booking request: {reason or '(no reason provided)'}",
+            "meta": booking_meta,
+        })
+
+    mem_obj.save_patient_json(new_record)  # writes <OFFLINE_PATIENT_DIR>/<pid>.json and updates memory
+    return new_pid
 
 # --- Tabs ---
 tab_general, tab_schedule = st.tabs(["General Assistant", "Quick Schedule"])
@@ -53,7 +168,8 @@ with tab_general:
     st.subheader("How can we help you today?")
     prompt = st.text_input(
         "Type your request",
-        placeholder="e.g., My 70-year-old father has chronic kidney disease — please book a nephrologist at North Clinic and summarize current treatments",
+        placeholder=("e.g., My 70-year-old father has chronic kidney disease — please book a nephrologist "
+                     "at North Clinic and summarize current treatments"),
         key="general_prompt",
     )
     c1, c2 = st.columns([1, 1])
@@ -68,31 +184,24 @@ with tab_general:
         st.rerun()
 
     if run_btn and prompt.strip():
-        # Resolve patient id from free text (Hal/Marisol/Ethan if their seeds are present)
         pid = mem.resolve_from_text(prompt) or "session"
-
-        # Log user message safely
         _safe_log(mem, pid, "user", prompt)
 
-        # Run the agent graph
         try:
             state_in = {"messages": [HumanMessage(content=prompt)], "patient_id": pid}
             state_out = graph.invoke(state_in)
 
-            # Prefer the last AI message; fall back to 'result'
+            # Prefer last AIMessage; fallback to 'result'
             assistant_text = ""
-            msgs = state_out.get("messages", [])
-            for m in reversed(msgs):
+            for m in reversed(state_out.get("messages", [])):
                 if isinstance(m, AIMessage):
                     assistant_text = m.content
                     break
             if not assistant_text:
                 assistant_text = state_out.get("result", "") or "(no result returned)"
 
-            # Log assistant message safely
             _safe_log(mem, pid, "assistant", assistant_text)
 
-            # UI
             st.session_state.last_response_general = assistant_text
             st.session_state.last_patient_general = pid
             st.success(f"Resolved patient: {pid}")
@@ -113,70 +222,134 @@ with tab_general:
 with tab_schedule:
     st.subheader("Book an appointment (simple form)")
 
-    # Load patients for dropdown
+    # --- Patient selection OR creation ---
+    st.markdown("**Find or add a patient**")
     patients = mem.list_patients()
-    if not patients:
-        st.info(
-            "No patients loaded. Add seed files to OFFLINE_PATIENT_DIR (default: data/patient_memory) "
-            "or use the Developer Console → Patient Seeds to import JSON."
-        )
-
     pretty_labels = [
         f'{p["patient_id"]} — {p.get("name","") or "(no name)"}'
         for p in patients
-    ] if patients else ["(none)"]
+    ] if patients else []
 
-    sel_ix = 0 if patients else 0
-    sel_label = st.selectbox(
-        "Patient",
-        options=pretty_labels,
-        index=sel_ix,
-        disabled=not patients,
-        key="sched_patient_label",
-    )
-    pid = None
-    if patients:
-        pid = patients[pretty_labels.index(sel_label)]["patient_id"]
-
-    # Pull booking hints from memory (clinic/modes/time window)
-    hints = mem.booking_hints(pid) if pid else {}
-    default_clinic = hints.get("clinic") or ""
-    default_modes = hints.get("modes") or []
-    default_tod = hints.get("preferred_time_of_day") or "morning"
-    dr_placeholder = "e.g., Nephrologist or Dr. Jane Lee"
-
-    cA, cB = st.columns([2, 1])
+    cA, cB = st.columns([1, 1])
     with cA:
-        doctor_name = st.text_input("Doctor or Specialty", value="", placeholder=dr_placeholder, key="sched_doc")
+        sel_label = st.selectbox(
+            "Existing patient (optional)",
+            options=(pretty_labels if pretty_labels else ["(none available)"]),
+            index=(0 if pretty_labels else 0),
+            disabled=(not pretty_labels),
+            key="sched_patient_label",
+        )
+        selected_pid = None
+        if pretty_labels:
+            selected_pid = patients[pretty_labels.index(sel_label)]["patient_id"]
     with cB:
-        clinic = st.text_input("Clinic (optional)", value=default_clinic, key="sched_clinic")
+        full_name = st.text_input("Full name (type to add or match)", value="", key="sched_fullname")
+
+    # Optional demographics (used if creating or updating)
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        dob = st.date_input("Date of birth (optional)", value=None, key="sched_dob")
+    with c2:
+        age_input = st.number_input("Age (optional)", min_value=0, max_value=120, value=0, step=1, key="sched_age")
+        age_val = int(age_input) if age_input else None
+    with c3:
+        sex = st.selectbox("Sex (optional)", options=["", "male", "female", "other"], index=0, key="sched_sex")
+
+    c4, c5 = st.columns([1, 1])
+    with c4:
+        phone = st.text_input("Phone (optional)", value="", key="sched_phone")
+    with c5:
+        email = st.text_input("Email (optional)", value="", key="sched_email")
+    address = st.text_input("Address (optional)", value="", key="sched_address")
+
+    st.markdown("---")
+
+    # --- Appointment details ---
+    dr_placeholder = "e.g., Orthopedist (Sports Medicine) or Dr. Jane Lee"
+    c6, c7 = st.columns([2, 1])
+    with c6:
+        doctor_name = st.text_input("Doctor or Specialty", value="", placeholder=dr_placeholder, key="sched_doc")
+    with c7:
+        clinic = st.text_input("Clinic (optional)", value="", key="sched_clinic")
 
     modes = st.multiselect(
         "Appointment mode(s)",
         options=["in-person", "video", "phone"],
-        default=default_modes if default_modes else ["in-person"],
+        default=["in-person"],
         key="sched_modes",
     )
     tod = st.selectbox(
         "Preferred time of day (optional)",
-        options=["morning", "afternoon", "evening"],
-        index=["morning", "afternoon", "evening"].index(default_tod) if default_tod in ["morning","afternoon","evening"] else 0,
+        options=["", "morning", "afternoon", "evening"],
+        index=0,
         key="sched_tod",
     )
 
-    # Default date: start of suggested date_range if present, else today
-    try:
-        start_iso = (hints.get("date_range") or {}).get("start")
-        default_date = date.fromisoformat(start_iso) if start_iso else date.today()
-    except Exception:
-        default_date = date.today()
-    appt_date = st.date_input("Appointment date", value=default_date, key="sched_date")
+    appt_date = st.date_input("Appointment date", value=date.today(), key="sched_date")
+    reason = st.text_area("Reason/Notes", placeholder="Short reason for visit…", key="sched_reason")
 
-    reason = st.text_area("Reason/Notes (optional)", placeholder="Short reason for visit…", key="sched_reason")
+    book_clicked = st.button("Book Appointment", type="primary", key="sched_submit")
 
-    book_clicked = st.button("Book Appointment", type="primary", disabled=not pid, key="sched_submit")
+    if book_clicked:
+        # Determine preferences (used for persisting to patient record)
+        prefs = {
+            "appointment_modes": modes or [],
+            "preferred_clinic": clinic.strip() or None,
+            "preferred_time_of_day": (tod or None),
+            "appointment_window_days": 14,
+        }
+        prefs = {k: v for k, v in prefs.items() if v}
 
-    if book_clicked and pid:
+        # Build booking meta for entry trail
+        booking_meta = {
+            "doctor_specialty": doctor_name.strip() or "Primary Care",
+            "clinic": clinic.strip() or None,
+            "modes": modes or [],
+            "preferred_time_of_day": (tod or None),
+            "date_range": {
+                "start": appt_date.isoformat(),
+                "end": appt_date.isoformat()
+            }
+        }
+
+        # Decide which patient to use:
+        pid = None
+        typed_name = (full_name or "").strip()
+        if typed_name:
+            # Use typed name: match existing or create new
+            pid = _ensure_patient_from_form(
+                mem,
+                full_name=typed_name,
+                dob=(dob if isinstance(dob, date) else None),
+                age_input=(age_val if age_val else None),
+                sex=(sex if sex else None),
+                phone=phone,
+                email=email,
+                address=address,
+                prefs=prefs,
+                booking_meta=booking_meta,
+                reason=reason,
+            )
+        elif selected_pid:
+            # Use selected existing patient (and optionally update details if provided)
+            pid = _ensure_patient_from_form(
+                mem,
+                full_name=(mem.get(selected_pid) or {}).get("profile", {}).get("full_name") or selected_pid,
+                dob=(dob if isinstance(dob, date) else None),
+                age_input=(age_val if age_val else None),
+                sex=(sex if sex else None),
+                phone=phone,
+                email=email,
+                address=address,
+                prefs=prefs,
+                booking_meta=booking_meta,
+                reason=reason,
+            )
+        else:
+            st.error("Please select an existing patient or type a full name to create a new one.")
+            st.stop()
+
+        # Now perform the booking
         payload = {
             "patient_id": pid,
             "doctor_name": (doctor_name or "Primary Care").strip(),
@@ -194,8 +367,9 @@ with tab_schedule:
         try:
             result = booking_tool.func(json.dumps(payload))
             result_str = result if isinstance(result, str) else json.dumps(result)
-            st.success("Booking request sent.")
+            st.success(f"Booking request sent for **{pid}**.")
             st.code(result_str, language="json")
+
             _safe_log(mem, pid, "user", f"[QuickSchedule] {json.dumps(payload)}")
             _safe_log(mem, pid, "assistant", f"[QuickSchedule Result] {result_str}")
         except Exception as e:
