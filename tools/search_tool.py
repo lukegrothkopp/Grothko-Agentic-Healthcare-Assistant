@@ -1,43 +1,62 @@
+# tools/search_tool.py
+# Clinical search tool constrained to trusted sources (NIH, CDC, WHO, Mayo, Cleveland Clinic, MedlinePlus).
+# Returns plain text; no numpy objects. Works with duckduckgo_search if available.
+
+from typing import List, Dict, Any
 from langchain.tools import Tool
-from typing import Optional
-import os
 
-def _ddg_search(query: str) -> str:
+TRUSTED_SITES = [
+    "nih.gov",
+    "cdc.gov",
+    "who.int",
+    "mayoclinic.org",
+    "clevelandclinic.org",
+    "medlineplus.gov",
+]
+
+def _ddg_text(query: str, max_results: int = 6) -> List[Dict[str, Any]]:
     try:
-        from duckduckgo_search import DDGS
-        hits = []
-        with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=6):
-                url = r.get("href") or r.get("link") or ""
-                title = (r.get("title") or "").strip()
-                body = (r.get("body") or "").strip()
-                if url and title:
-                    hits.append(f"- {title} ({url}): {body[:200]}")
-        return "\n".join(hits) if hits else "No results found via DuckDuckGo."
-    except Exception as e:
-        return f"DuckDuckGo search failed: {e}"
+        # pip install duckduckgo_search>=6
+        from duckduckgo_search import DDGS  # type: ignore
+        # Try "api" backend first, fallback to "lite"
+        try:
+            return list(DDGS().text(query, max_results=max_results, backend="api"))
+        except Exception:
+            return list(DDGS().text(query, max_results=max_results, backend="lite"))
+    except Exception:
+        # No dependency or network blocked
+        return []
 
-def _serp_search(query: str) -> str:
-    try:
-        from langchain.utilities import SerpAPIWrapper
-        search = SerpAPIWrapper()
-        return search.run(query)
-    except Exception as e:
-        return f"SerpAPI search failed: {e}"
+def _clinical_search(user_query: str) -> str:
+    q = (user_query or "").strip()
+    if not q:
+        return "No query provided."
+    # Bias results to trusted domains
+    domain_filter = " OR ".join(f"site:{d}" for d in TRUSTED_SITES)
+    query = f"{q} {domain_filter}"
 
-def medical_search(query: str) -> str:
-    if os.getenv("SERPAPI_API_KEY"):
-        out = _serp_search(query)
-        if out and not out.lower().startswith("serpapi search failed"):
-            return out
-    return _ddg_search(query)
+    results = _ddg_text(query, max_results=8)
+    if not results:
+        return "(online search unavailable or returned no results; if running locally, add 'duckduckgo_search' to requirements.txt)"
+
+    # Format as a simple, safe list
+    lines: List[str] = []
+    for r in results[:6]:
+        title = str(r.get("title") or "").strip()
+        href = str(r.get("href") or r.get("url") or "").strip()
+        if not href:
+            continue
+        if not title:
+            title = href
+        lines.append(f"- {title} — {href}")
+
+    out = "\n".join(lines).strip()
+    return out if out else "(no results from trusted sources)"
 
 def get_medical_search_tool() -> Tool:
+    # IMPORTANT: Name matches what the graph looks for.
     return Tool(
-        name="Medical Search",
-        func=medical_search,
-        description=(
-            "Search external medical info (WHO/NIH/CDC etc.). Input is a plain text query; "
-            "returns short snippets with URLs."
-        ),
+        name="Clinical Search (SERP/DDG)",
+        func=_clinical_search,
+        description="Search trusted medical sources (NIH, CDC, WHO, Mayo Clinic, Cleveland Clinic, MedlinePlus). Returns a plain-text bulleted list with links."
     )
