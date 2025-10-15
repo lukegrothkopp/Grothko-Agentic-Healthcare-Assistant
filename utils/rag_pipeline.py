@@ -1,20 +1,51 @@
 # utils/rag_pipeline.py
-# Simple, dependency-light TF-IDF RAG with strictly Python lists/floats (no NumPy truthiness)
+# Pure-Python TF-IDF RAG with diagnostics, backend label, PDF/DOCX optional support,
+# and simple medical abbreviation expansions to improve recall (e.g., "CKD").
 
 import os
 import re
 from math import log, sqrt
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 from collections import Counter
+
+# ---------------------------
+# Tokenization & expansions
+# ---------------------------
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 
+# Common medical abbreviations -> expanded tokens (very light-weight)
+_ABBREV_EXPANSIONS: Dict[str, List[str]] = {
+    "ckd": ["chronic", "kidney", "disease"],
+    "htn": ["hypertension"],
+    "dm": ["diabetes", "mellitus"],
+    "copd": ["chronic", "obstructive", "pulmonary", "disease"],
+    "cad": ["coronary", "artery", "disease"],
+    "mi": ["myocardial", "infarction"],
+    "afib": ["atrial", "fibrillation"],
+}
 
 def _tokenize(text: str) -> List[str]:
     if not text:
         return []
     return [t.lower() for t in _TOKEN_RE.findall(text)]
 
+def _expand_tokens(tokens: List[str]) -> List[str]:
+    """
+    If a token is a known abbreviation (e.g., 'ckd'), append its expansions
+    so doc/query vocabularies overlap more often.
+    """
+    out: List[str] = []
+    for t in tokens:
+        out.append(t)
+        if t in _ABBREV_EXPANSIONS:
+            out.extend(_ABBREV_EXPANSIONS[t])
+    return out
+
+
+# ---------------------------
+# Light file readers
+# ---------------------------
 
 def _read_text_file(path: str) -> str:
     try:
@@ -23,26 +54,47 @@ def _read_text_file(path: str) -> str:
     except Exception:
         return ""
 
-
 def _read_pdf_file(path: str) -> str:
-    # Optional PDF support without introducing new deps:
-    # If PyPDF2 is present, use it; otherwise skip PDFs gracefully.
+    """Optional PDF support if PyPDF2 is available; otherwise returns empty."""
     try:
         import PyPDF2  # type: ignore
     except Exception:
         return ""
     try:
-        text_parts: List[str] = []
+        parts: List[str] = []
         with open(path, "rb") as f:
             reader = PyPDF2.PdfReader(f)
             for page in reader.pages:
                 try:
-                    text_parts.append(page.extract_text() or "")
+                    parts.append(page.extract_text() or "")
                 except Exception:
                     pass
-        return "\n".join([t for t in text_parts if t]).strip()
+        return "\n".join([p for p in parts if p]).strip()
     except Exception:
         return ""
+
+def _read_docx_file(path: str) -> str:
+    """Optional DOCX support if python-docx OR docx2txt is available."""
+    # Try python-docx first
+    try:
+        import docx  # type: ignore
+        try:
+            doc = docx.Document(path)
+            return "\n".join([p.text for p in doc.paragraphs if p.text]).strip()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # Try docx2txt as fallback
+    try:
+        import docx2txt  # type: ignore
+        try:
+            return (docx2txt.process(path) or "").strip()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return ""
 
 
 class RAGPipeline:
@@ -51,16 +103,48 @@ class RAGPipeline:
     - Indexes text-like files under OFFLINE_KB_DIR (default: data/offline_kb).
     - Pure Python (no sklearn/numpy required) to avoid ambiguous truthiness.
     - retrieve(query, k) returns List[Tuple[str, float]] -> (snippet, score)
+    - Provides diagnostics and backend label for the Developer Console.
     """
 
     def __init__(self, kb_dir: Optional[str] = None):
+        # Public labels read by the Developer Console
+        self.backend: str = "tfidf-python"
+        self.backend_name: str = "tfidf-python"
+        self.backend_label: str = "tfidf-python"
+
         self.kb_dir: str = kb_dir or os.getenv("OFFLINE_KB_DIR", "data/offline_kb")
-        self.docs: List[str] = []          # raw doc texts
-        self.paths: List[str] = []         # file paths (parallel to docs)
+        self.docs: List[str] = []           # raw doc texts
+        self.paths: List[str] = []          # file paths (parallel to docs)
         self.doc_weights: List[Dict[str, float]] = []  # tf-idf weight dict per doc
-        self.doc_norms: List[float] = []   # L2 norm per doc
-        self.idf: Dict[str, float] = {}    # idf per term
+        self.doc_norms: List[float] = []    # L2 norm per doc
+        self.idf: Dict[str, float] = {}     # idf per term
         self._build_index()
+
+    # ---------- Public utilities ----------
+    def set_kb_dir(self, kb_dir: str) -> None:
+        """Change KB directory and rebuild index."""
+        self.kb_dir = kb_dir
+        self._build_index()
+
+    def rebuild_index(self) -> None:
+        """Rebuild the index from current kb_dir."""
+        self._build_index()
+
+    def status(self) -> Dict[str, Any]:
+        """Return diagnostics for UI/console."""
+        exts: Counter = Counter()
+        if os.path.isdir(self.kb_dir):
+            for root, _, files in os.walk(self.kb_dir):
+                for name in files:
+                    _, ext = os.path.splitext(name)
+                    exts[ext.lower()] += 1
+        return {
+            "backend": self.backend_label,
+            "kb_dir": self.kb_dir,
+            "kb_exists": os.path.isdir(self.kb_dir),
+            "num_docs": len(self.docs),
+            "file_type_counts": dict(exts),
+        }
 
     # ---------- Indexing ----------
     def _iter_files(self) -> List[str]:
@@ -70,15 +154,22 @@ class RAGPipeline:
         for root, _, files in os.walk(self.kb_dir):
             for name in files:
                 p = os.path.join(root, name)
-                if p.lower().endswith((".txt", ".md", ".markdown", ".rst", ".log", ".cfg", ".ini", ".json", ".csv", ".tsv", ".yml", ".yaml")):
+                low = p.lower()
+                if low.endswith((".txt", ".md", ".markdown", ".rst", ".log", ".cfg", ".ini",
+                                 ".json", ".csv", ".tsv", ".yml", ".yaml")):
                     out.append(p)
-                elif p.lower().endswith(".pdf"):
+                elif low.endswith(".pdf"):
+                    out.append(p)
+                elif low.endswith(".docx"):
                     out.append(p)
         return out
 
     def _load_text(self, path: str) -> str:
-        if path.lower().endswith(".pdf"):
+        low = path.lower()
+        if low.endswith(".pdf"):
             return _read_pdf_file(path)
+        if low.endswith(".docx"):
+            return _read_docx_file(path)
         return _read_text_file(path)
 
     def _build_index(self) -> None:
@@ -92,7 +183,10 @@ class RAGPipeline:
             if text and isinstance(text, str):
                 self.docs.append(text)
                 self.paths.append(p)
-                tokenized_docs.append(_tokenize(text))
+                toks = _tokenize(text)
+                toks = _expand_tokens(toks)
+                tokenized_docs.append(toks)
+
         N = len(tokenized_docs)
 
         # Early out: empty index
@@ -128,6 +222,7 @@ class RAGPipeline:
     # ---------- Retrieval ----------
     def _query_weights(self, query: str) -> Dict[str, float]:
         toks = _tokenize(query)
+        toks = _expand_tokens(toks)
         if not toks:
             return {}
         tf = Counter(toks)
@@ -153,9 +248,8 @@ class RAGPipeline:
 
     def retrieve(self, query: str, k: int = 3) -> List[Tuple[str, float]]:
         """
-        Return top-k (snippet, score) pairs. No NumPy objects; only Python lists/floats.
+        Return top-k (snippet, score) pairs. Uses only Python lists/floats.
         """
-        # Guard: empty index or query
         if not isinstance(query, str) or not query.strip() or len(self.docs) == 0:
             return []
 
@@ -183,10 +277,11 @@ class RAGPipeline:
         results.sort(key=lambda x: x[1], reverse=True)
         top = results[: max(1, int(k))]
 
-        # Make short snippets for readability (first ~500 chars)
+        # Make short snippets for readability (first ~600 chars)
         out: List[Tuple[str, float]] = []
         for idx, score in top:
             text = self.docs[idx]
-            snippet = (text[:500] + "…") if len(text) > 500 else text
+            snippet = (text[:600] + "…") if len(text) > 600 else text
             out.append((snippet, float(score)))
         return out
+
