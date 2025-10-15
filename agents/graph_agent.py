@@ -1,7 +1,7 @@
-import os, json, re, datetime
+import os, json, re
 from datetime import date, timedelta
 from operator import add as list_concat
-from typing import TypedDict, List, Optional
+from typing import TypedDict, List, Optional, Tuple, Any
 from typing_extensions import Annotated
 
 from pydantic import BaseModel, Field
@@ -148,6 +148,30 @@ def _make_booking_payload(user_text: str, fallback_pid: Optional[str]) -> str:
 
 
 # =========================
+# Array-safe helpers
+# =========================
+
+def _to_list(obj: Any) -> List[Any]:
+    """Normalize arrays/iterables into a plain Python list."""
+    if obj is None:
+        return []
+    try:
+        import numpy as np  # optional
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except Exception:
+        pass
+    if isinstance(obj, (list, tuple)):
+        return list(obj)
+    # Fallback: wrap singletons
+    return [obj]
+
+def _nonempty_str(s: Any) -> bool:
+    """True iff s is a non-empty string after stripping."""
+    return isinstance(s, str) and len(s.strip()) > 0
+
+
+# =========================
 # Graph
 # =========================
 
@@ -164,12 +188,32 @@ def build_graph(model_name: str = "gpt-4o-mini"):
     tools.append(get_offline_kb_tool())
 
     rag = RAGPipeline()
+
     def rag_retrieve(q: str) -> str:
-        pairs = rag.retrieve(q, k=3)
-        if not pairs: return "No local KB results."
-        return "\n".join([f"- {t[:400]}" for t, _ in pairs])
-    tools.append(Tool(name="RAG Retrieve", func=rag_retrieve,
-                      description="Retrieve top chunks from offline KB (no LLM required)."))
+        """
+        Always return a STRING. Safely normalizes any array-like results to avoid
+        'truth value of an array is ambiguous' errors.
+        """
+        try:
+            pairs = rag.retrieve(q, k=3)
+        except Exception as e:
+            return f"(RAG error) {e}"
+
+        items = _to_list(pairs)
+        if len(items) == 0:
+            return "No local KB results."
+
+        lines: List[str] = []
+        for it in items:
+            # Expect (text, score) or just text
+            text: str
+            if isinstance(it, (list, tuple)) and len(it) >= 1:
+                text = str(it[0])
+            else:
+                text = str(it)
+            lines.append(f"- {text[:400]}")
+        out = "\n".join(lines).strip()
+        return out if _nonempty_str(out) else "No local KB results."
 
     graph = StateGraph(AgentState)
 
@@ -182,10 +226,17 @@ def build_graph(model_name: str = "gpt-4o-mini"):
                 user_text = m.content
                 break
         _, _, pre = memory_context_provider(state.get("patient_id"), user_text, k=3)
-        sys_msg = SystemMessage(content=(SYSTEM_SAFETY + "\n\n" + pre).strip())
-        if any(isinstance(m, SystemMessage) and SYSTEM_SAFETY.splitlines()[0] in getattr(m, "content", "") for m in state.get("messages", [])):
+        sys_payload = (SYSTEM_SAFETY + "\n\n" + pre).strip()
+
+        already = any(
+            isinstance(m, SystemMessage)
+            and isinstance(getattr(m, "content", None), str)
+            and SYSTEM_SAFETY.splitlines()[0] in m.content
+            for m in state.get("messages", [])
+        )
+        if already:
             return {}
-        return {"messages": [sys_msg]}
+        return {"messages": [SystemMessage(content=sys_payload)]}
 
     def plan(state: AgentState):
         user_text = ""
@@ -193,14 +244,14 @@ def build_graph(model_name: str = "gpt-4o-mini"):
             if isinstance(m, HumanMessage):
                 user_text = m.content; break
         steps: List[str] = ["search"]
-        if planner and user_text:
+        if planner and _nonempty_str(user_text):
             prompt = [
                 SystemMessage(content=SAFETY_CORE),
                 HumanMessage(content=PLAN_TEMPLATE + "\n\nUser: " + user_text)
             ]
             try:
                 out = planner.invoke(prompt)
-                if out and out.steps:
+                if out and isinstance(out.steps, list) and len(out.steps) > 0:
                     steps = [s for s in out.steps if s in {"search","records","booking","rag"}]
             except Exception:
                 pass
@@ -219,66 +270,70 @@ def build_graph(model_name: str = "gpt-4o-mini"):
             if isinstance(m, HumanMessage):
                 text = m.content; break
         payload = _make_booking_payload(text, state.get("patient_id"))
-        res = "Booking tool unavailable."
+        res: Any = "Booking tool unavailable."
         for t in tools:
             if t.name == "Book Appointment":
                 res = t.func(payload); break
+        # Normalize to string
+        res_str = res if isinstance(res, str) else json.dumps(res)
         pid = state.get("patient_id") or json.loads(payload).get("patient_id")
         if pid:
-            _mem().record_event(pid, f"[Booking] {res}", meta={"stage": "booking"})
-        return {"result": res, "messages": [AIMessage(content=res)]}
+            _mem().record_event(pid, f"[Booking] {res_str}", meta={"stage": "booking"})
+        return {"result": res_str, "messages": [AIMessage(content=res_str)]}
 
     def do_records(state: AgentState):
         text = ""
         for m in reversed(state.get("messages", [])):
             if isinstance(m, HumanMessage):
                 text = m.content; break
-        if any(w in text.lower() for w in ["load","retrieve","show"]):
+        if any(w in (text or "").lower() for w in ["load","retrieve","show"]):
             tool_name = "Retrieve Medical History"
             input_payload = (state.get("patient_id") or "")
         else:
             tool_name = "Manage Medical Records"
             pid = state.get("patient_id") or "patient_001"
             input_payload = json.dumps({"patient_id": pid, "data": {"latest_note": text}})
-        res = "Records tool unavailable."
+        res: Any = "Records tool unavailable."
         for t in tools:
             if t.name == tool_name:
                 res = t.func(input_payload); break
-        return {"result": res, "messages": [AIMessage(content=res)]}
+        res_str = res if isinstance(res, str) else json.dumps(res)
+        return {"result": res_str, "messages": [AIMessage(content=res_str)]}
 
     def do_search(state: AgentState):
         text = ""
         for m in reversed(state.get("messages", [])):
             if isinstance(m, HumanMessage):
                 text = m.content; break
-        res = ""
-        for t in tools:
-            if t.name == "RAG Retrieve":
-                res = t.func(text); break
-        res = res or "No local KB results."
+
+        # First: local RAG (always returns a string)
+        rag_text = rag_retrieve(text)
+        out = rag_text if _nonempty_str(rag_text) else "No local KB results."
+
+        # Second: clinical search tool (guard outputs to string)
         for t in tools:
             if t.name == "Clinical Search (SERP/DDG)":
                 try:
                     res2 = t.func(text)
-                    if res2 and isinstance(res2, str):
-                        res = res + "\n\n" + res2 if res else res2
+                    res2_str = res2 if isinstance(res2, str) else json.dumps(res2)
+                    if _nonempty_str(res2_str):
+                        out = (out + "\n\n" + res2_str) if _nonempty_str(out) else res2_str
                 except Exception:
                     pass
                 break
-        if not res:
-            res = "No results."
-        return {"result": res, "messages": [AIMessage(content=res)]}
+
+        if not _nonempty_str(out):
+            out = "No results."
+        return {"result": out, "messages": [AIMessage(content=out)]}
 
     def do_rag(state: AgentState):
         text = ""
         for m in reversed(state.get("messages", [])):
             if isinstance(m, HumanMessage):
                 text = m.content; break
-        res = "No local KB results."
-        for t in tools:
-            if t.name == "RAG Retrieve":
-                res = t.func(text); break
-        return {"result": res, "messages": [AIMessage(content=res)]}
+        out = rag_retrieve(text)
+        out = out if _nonempty_str(out) else "No local KB results."
+        return {"result": out, "messages": [AIMessage(content=out)]}
 
     def finalize(state: AgentState):
         return {}
