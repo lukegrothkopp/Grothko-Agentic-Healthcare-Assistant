@@ -3,6 +3,11 @@ import streamlit as st
 from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 from agents.graph_agent import build_graph
+from utils.patient_memory import PatientMemory
+...
+if "patient_memory" not in st.session_state:
+    st.session_state.patient_memory = PatientMemory()
+mem = st.session_state.patient_memory
 
 load_dotenv()
 for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY"):
