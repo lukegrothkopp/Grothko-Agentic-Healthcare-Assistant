@@ -1,6 +1,10 @@
 # utils/patient_memory.py
-# Lightweight in-memory patient store with seed auto-load, simple search,
-# seed-dir knob OFFLINE_PATIENT_DIR, and small utilities used by the Console.
+# In-memory patient store with:
+# - OFFLINE_PATIENT_DIR knob (default: data/patient_memory)
+# - seed auto-load/save
+# - simple search & booking preference helpers
+# - robust resolve_from_text() (now handles "mother/50/knee")
+# - add_message() shim for legacy callers (maps to record_event)
 
 import os, json, re
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,7 +21,6 @@ class PatientMemory:
 
     # ---------- Seed loading / saving ----------
     def reload_from_dir(self, path: Optional[str] = None) -> None:
-        """Clear and (re)load all patient JSON records from a folder."""
         if path:
             self.seed_dir = path
         try:
@@ -41,7 +44,6 @@ class PatientMemory:
                 continue
 
     def save_patient_json(self, data: Dict[str, Any], dir_path: Optional[str] = None) -> str:
-        """Write a single patient JSON to <dir>/<patient_id>.json and (re)load it."""
         target_dir = dir_path or self.seed_dir
         os.makedirs(target_dir, exist_ok=True)
         pid = str(data.get("patient_id") or "").strip()
@@ -50,7 +52,6 @@ class PatientMemory:
         out_path = os.path.join(target_dir, f"{pid}.json")
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        # refresh just this record
         self.patients[pid] = data
         return out_path
 
@@ -71,6 +72,14 @@ class PatientMemory:
         entries.append({"ts": now, "type": "note", "text": text, "meta": meta or {}})
         p["last_updated"] = now
 
+    # --- Back-compat shim used by pages/1_Patient_Assistant.py ---
+    def add_message(self, patient_id: str, role: str, content: str) -> None:
+        """
+        Legacy compatibility: the old code calls mem.add_message(pid, role, content).
+        We map that to record_event with role in meta.
+        """
+        self.record_event(patient_id or "session", f"[{role}] {content}", meta={"role": role})
+
     # ---------- Summaries & search ----------
     def get_summary(self, patient_id: Optional[str]) -> str:
         if not patient_id:
@@ -85,7 +94,6 @@ class PatientMemory:
         return f"{name}: {probs}" if probs else name
 
     def search(self, patient_id: Optional[str], query: str, k: int = 3) -> List[str]:
-        """Very simple relevance: look in entries, problems, meds, labs text fields."""
         if not patient_id or not query or not isinstance(query, str):
             return []
         p = self.patients.get(patient_id)
@@ -98,25 +106,26 @@ class PatientMemory:
             if text and isinstance(text, str):
                 hits.append((weight, text))
 
-        # entries
         for e in p.get("entries", []):
             t = str(e.get("text") or "")
             if q in t.lower():
                 add_hit(10, t)
-        # problems / meds
+
         for prob in p.get("problems", []):
             t = str(prob.get("name") or "")
             if q in t.lower():
                 add_hit(7, f"Problem: {t}")
+
         for med in p.get("medications", []):
             t = str(med.get("name") or "")
             if q in t.lower():
                 add_hit(4, f"Medication: {t}")
-        # labs summary
+
         for lab in p.get("labs", []):
             vals = lab.get("values", {})
             line = []
-            for key in ("creatinine_mg_dL","egfr_mL_min_1.73m2","urine_acr_mg_g","a1c_percent","hemoglobin_g_dL","potassium_mmol_L","co2_bicarb_mmol_L"):
+            for key in ("creatinine_mg_dL","egfr_mL_min_1.73m2","urine_acr_mg_g",
+                        "a1c_percent","hemoglobin_g_dL","potassium_mmol_L","co2_bicarb_mmol_L"):
                 if key in vals:
                     line.append(f"{key}={vals[key]}")
             if line:
@@ -126,46 +135,83 @@ class PatientMemory:
         return [t for _, t in hits[:max(1,int(k))]]
 
     # ---------- Patient resolution from free text ----------
-    _AGE_RE = re.compile(r"\b(\d{2})-?year-?old\b|\bage\s+(\d{2})\b", re.I)
+    _AGE_RE = re.compile(r"\b(\d{1,3})\s*-?\s*year-?\s*old\b|\bage\s+(\d{1,3})\b", re.I)
+
+    def _has_problem_keyword(self, data: Dict[str, Any], keywords: List[str]) -> bool:
+        probs = [p.get("name","").lower() for p in data.get("problems",[])]
+        text = " ".join(probs)
+        return any(kw in text for kw in keywords)
+
     def resolve_from_text(self, text: str) -> Optional[str]:
-        """Heuristics to pick a patient from user text."""
+        """Heuristics to pick a patient from user text (handles 'father', 'mother', ages, knee/CKD, etc.)."""
         if not text:
             return None
         t = text.lower()
-        # Direct ID mention
+
+        # Direct ID mention (e.g., "patient_701")
         m = re.search(r"patient[_\s-]?(\d{3,})", t)
         if m:
             pid = f"patient_{m.group(1)}"
             if pid in self.patients:
                 return pid
+
         # Name mention
         for pid, data in self.patients.items():
             name = ((data.get("profile") or {}).get("full_name") or "").lower()
             last = name.split()[-1] if name else ""
-            if name and (name in t or last and last in t):
+            if name and (name in t or (last and last in t)):
                 return pid
-        # CKD father/70 heuristic
-        if ("father" in t or "dad" in t) and ("kidney" in t or "ckd" in t):
-            m2 = self._AGE_RE.search(t)
-            if m2:
-                age = m2.group(1) or m2.group(2)
-                try:
-                    if 68 <= int(age) <= 74:
-                        for pid, data in self.patients.items():
-                            probs = [p.get("name","").lower() for p in data.get("problems",[])]
-                            if any("chronic kidney disease" in x for x in probs):
-                                return pid
-                except Exception:
-                    pass
+
+        # Age extraction (first match)
+        age: Optional[int] = None
+        m2 = self._AGE_RE.search(t)
+        if m2:
+            try:
+                age = int(m2.group(1) or m2.group(2))
+            except Exception:
+                age = None
+
+        # Relation flags
+        is_father = ("father" in t or "dad" in t)
+        is_mother = ("mother" in t or "mom" in t or "mum" in t)
+
+        # Problem-domain flags
+        mentions_ckd = ("ckd" in t) or ("kidney" in t) or ("nephro" in t)
+        mentions_knee = ("knee" in t) or ("orthop" in t) or ("sports med" in t)
+
+        # Heuristic buckets
+        # CKD father ~70 -> likely patient_701
+        if is_father and mentions_ckd and (age is None or 65 <= age <= 80):
             for pid, data in self.patients.items():
-                probs = [p.get("name","").lower() for p in data.get("problems",[])]
-                if any("chronic kidney disease" in x for x in probs):
+                if self._has_problem_keyword(data, ["chronic kidney disease"]):
                     return pid
+
+        # Knee mother ~50 -> likely patient_702
+        if is_mother and mentions_knee and (age is None or 45 <= age <= 60):
+            for pid, data in self.patients.items():
+                if self._has_problem_keyword(data, ["knee", "osteoarthritis"]):
+                    return pid
+
+        # Generic fallbacks by condition
+        if mentions_ckd:
+            for pid, data in self.patients.items():
+                if self._has_problem_keyword(data, ["chronic kidney disease"]):
+                    return pid
+        if mentions_knee:
+            for pid, data in self.patients.items():
+                if self._has_problem_keyword(data, ["knee", "osteoarthritis"]):
+                    return pid
+
+        # Teens + sports injury → pick any adolescent ortho case
+        if age is not None and 12 <= age <= 18 and ("arm" in t or "fracture" in t or "sports" in t):
+            for pid, data in self.patients.items():
+                if self._has_problem_keyword(data, ["fracture", "buckle", "radius"]):
+                    return pid
+
         return None
 
     # ---------- Convenience for the Console ----------
     def list_patients(self) -> List[Dict[str, Any]]:
-        """Return a compact list for preview: id, name, age, key problems, last_updated."""
         out: List[Dict[str, Any]] = []
         for pid, p in sorted(self.patients.items(), key=lambda kv: kv[0]):
             prof = p.get("profile") or {}
@@ -193,4 +239,3 @@ class PatientMemory:
             "preferred_time_of_day": prefs.get("preferred_time_of_day"),
             "date_range": {"start": start, "end": end}
         }
-
