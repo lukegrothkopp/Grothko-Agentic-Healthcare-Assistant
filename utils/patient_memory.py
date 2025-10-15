@@ -19,6 +19,10 @@ class PatientMemory:
         self.patients: Dict[str, Dict[str, Any]] = {}
         self.reload_from_dir(self.seed_dir)
 
+    def add_message(self, patient_id: str, role: str, content: str) -> None:
+    """Legacy compatibility for older pages."""
+    self.record_event(patient_id or "session", f"[{role}] {content}", meta={"role": role})
+    
     # ---------- Seed loading / saving ----------
     def reload_from_dir(self, path: Optional[str] = None) -> None:
         if path:
