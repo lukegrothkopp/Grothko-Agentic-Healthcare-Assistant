@@ -1,0 +1,116 @@
+{
+  "patient_id": "patient_703",
+  "profile": {
+    "full_name": "Ethan Rivera",
+    "dob": "2009-04-18",
+    "age": 16,
+    "sex": "male",
+    "contact": { "phone": "(555) 017-3703", "email": "ethan.rivera@example.com" },
+    "address": "412 Maple Court, Seattle, WA 98103",
+    "emergency_contact": { "name": "Maria Rivera", "relation": "mother", "phone": "(555) 017-3704" }
+  },
+  "allergies": [
+    { "substance": "NKDA", "reaction": "none reported" }
+  ],
+  "problems": [
+    {
+      "name": "Left distal radius (forearm) buckle fracture — baseball injury",
+      "codes": { "icd10": "S52.522A" },
+      "status": "active",
+      "since": "2025-10-12",
+      "notes": "Pain/swelling after being struck by ball; splinted in urgent care; neurovascularly intact."
+    },
+    {
+      "name": "History of concussion (single episode, 2023, football)",
+      "codes": { "icd10": "Z87.820" },
+      "status": "historical",
+      "since": "2023-09-18",
+      "notes": "No persistent neurologic symptoms; completed return-to-play protocol."
+    },
+    {
+      "name": "Myopia (nearsightedness), wears glasses",
+      "codes": { "icd10": "H52.13" },
+      "status": "active",
+      "since": "2019-05-01",
+      "notes": "Last optometry visit 2025-06; Rx updated."
+    }
+  ],
+  "medications": [
+    { "name": "Acetaminophen", "dose": "500 mg", "route": "PO", "frequency": "q6h PRN pain", "status": "as_needed" },
+    { "name": "Ibuprofen", "dose": "400 mg", "route": "PO", "frequency": "q8h PRN pain with food", "status": "as_needed", "notes": "Avoid if stomach upset; stop 24h before ortho evaluation if advised." }
+  ],
+  "vitals": [
+    { "date": "2025-10-12", "bp": "112/68", "hr_bpm": 76, "temp_c": 36.8, "weight_kg": 62, "height_cm": 172, "bmi": 20.9 }
+  ],
+  "labs": [],
+  "lab_trends": [],
+  "imaging": [
+    {
+      "date": "2025-10-12",
+      "modality": "X-ray forearm (left)",
+      "result": "Buckle (torus) fracture of distal radius; alignment maintained; no ulna fracture; soft-tissue swelling present."
+    },
+    {
+      "date": "2023-09-18",
+      "modality": "Head CT (post-concussion)",
+      "result": "No acute intracranial abnormality."
+    }
+  ],
+  "care_team": {
+    "pcp": { "name": "Dr. Lila Nguyen", "clinic": "Greenlake Pediatrics", "phone": "(555) 017-3710" },
+    "preferred_specialist": { "specialty": "Pediatric Orthopedics", "suggested_name": "Dr. Aaron Blake" },
+    "optometry": { "name": "Dr. Sofia Lin", "clinic": "ClearView Optometry", "phone": "(555) 017-3801" }
+  },
+  "preferences": {
+    "appointment_modes": ["in-person"],
+    "preferred_clinic": "Westside Sports Medicine Clinic",
+    "preferred_time_of_day": "afternoon",
+    "appointment_window_days": 7
+  },
+  "school_sports": {
+    "sports": ["baseball", "football (off-season)"],
+    "notes": "Currently out of contact sports; baseball throwing restricted until cleared by ortho."
+  },
+  "summary": "16-year-old boy with left distal radius buckle fracture from baseball (splinted, needs pediatric ortho follow-up). History of single football-related concussion in 2023 with full recovery. Wears glasses for myopia.",
+  "entries": [
+    {
+      "ts": "2025-10-12T17:40:00-07:00",
+      "type": "injury_note",
+      "text": "Struck on left forearm by baseball during practice; immediate pain and swelling; urgent care placed volar splint; advised ice/elevation and oral analgesics.",
+      "meta": { "location": "Greenlake Urgent Care" }
+    },
+    {
+      "ts": "2025-10-12T18:05:00-07:00",
+      "type": "imaging",
+      "text": "X-ray: distal radius buckle fracture; alignment maintained; no ulna involvement.",
+      "meta": { "facility": "Greenlake Urgent Care Radiology" }
+    },
+    {
+      "ts": "2025-10-15T08:15:00-07:00",
+      "type": "booking_request",
+      "text": "Book pediatric orthopedics within 1 week at Westside Sports Medicine Clinic; afternoons preferred; in-person.",
+      "meta": {
+        "doctor_specialty": "Pediatric Orthopedist",
+        "doctor_name_hint": "Dr. Aaron Blake",
+        "clinic": "Westside Sports Medicine Clinic",
+        "modes": ["in-person"],
+        "preferred_time_of_day": "afternoon",
+        "date_range": { "start": "2025-10-16", "end": "2025-10-22" }
+      }
+    },
+    {
+      "ts": "2025-10-15T08:16:00-07:00",
+      "type": "kb_hint",
+      "text": "Topics to fetch via RAG: pediatric distal radius buckle fracture immobilization vs removable splints; typical healing times and return-to-sport guidance; pain control basics. Concussion history: graduated return-to-play protocol (when relevant). Myopia: annual optometry follow-up and sports eye protection.",
+      "meta": {
+        "query_suggestions": [
+          "pediatric distal radius buckle fracture splint removable guideline",
+          "return to sports after forearm fracture adolescent",
+          "concussion return to play stepwise protocol adolescent",
+          "myopia eye protection sports adolescents"
+        ]
+      }
+    }
+  ],
+  "last_updated": "2025-10-15T08:20:00-07:00"
+}
