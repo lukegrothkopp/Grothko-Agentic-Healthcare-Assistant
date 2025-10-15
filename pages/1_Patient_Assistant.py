@@ -18,7 +18,7 @@ load_dotenv()
 
 st.set_page_config(page_title="Patient Assistant", layout="wide")
 st.title("🩺 Patient Assistant")
-st.caption("Ask for help with scheduling, records, and general info from trusted sources. (No medical advice.)")
+st.caption("Ask for help with scheduling, records, and general info from trusted sources. (Won't provide medical advice)")
 
 # --- Singletons ---
 if "graph" not in st.session_state:
