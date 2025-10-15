@@ -1,62 +1,101 @@
-import os, json
+# pages/2_Clinician_Console.py
+import os
+from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
-from agents.graph_agent import build_graph
-from utils.database_ops import get_patient_record, update_patient_record
+
 from utils.patient_memory import PatientMemory
 
 load_dotenv()
-for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "CLINICIAN_TOKEN"):
-    if k in st.secrets and st.secrets[k]:
-        os.environ[k] = str(st.secrets[k]).strip()
 
 st.set_page_config(page_title="Clinician Console", layout="wide")
-st.title("👩‍⚕️ Clinician Console")
+st.title("🩻 Clinician Console")
+st.caption("Operational view of patient context, recent events, and quick actions.")
 
-# Gate with a clinician code
-required = os.environ.get("CLINICIAN_TOKEN") or st.secrets.get("CLINICIAN_TOKEN", "")
-code = st.sidebar.text_input("Access code", type="password")
-if required and code.strip() != str(required).strip():
-    st.warning("Enter a valid clinician access code to view this console.")
+# --- Singleton memory ---
+if "pmemory" not in st.session_state:
+    st.session_state.pmemory = PatientMemory()
+_mem: PatientMemory = st.session_state.pmemory
+
+# --- Patient picker (blank by default) ---
+patients = _mem.list_patients()
+pretty = [f'{p["patient_id"]} — {p.get("name","") or "(no name)"}' for p in patients]
+
+placeholder = "— Select a patient —"
+options = [placeholder] + pretty if pretty else ["— No patients loaded —"]
+sel = st.selectbox("Patient", options=options, index=0, disabled=(not pretty))
+
+pid = None
+if pretty and sel != placeholder:
+    pid = patients[pretty.index(sel)].get("patient_id")
+
+if not pid:
+    st.info("Select a patient to view details.")
     st.stop()
 
-st.caption("Admin & workflow tooling for clinicians/admins. No medical advice is generated.")
+# --- Summary header ---
+data = _mem.get(pid) or {}
+profile = data.get("profile") or {}
+name = profile.get("full_name") or pid
+st.subheader(name)
+st.caption(f"Patient ID: {pid}")
+if data.get("summary"):
+    st.write(data["summary"])
 
-graph = build_graph(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+# --- Columns: Problems / Meds / Latest Labs ---
+c1, c2, c3 = st.columns(3)
+with c1:
+    st.markdown("**Key Problems**")
+    probs = data.get("problems") or []
+    if not probs:
+        st.write("—")
+    else:
+        for p in probs[:6]:
+            st.write(f"- {p.get('name','')}")
+with c2:
+    st.markdown("**Medications**")
+    meds = data.get("medications") or []
+    if not meds:
+        st.write("—")
+    else:
+        for m in meds[:8]:
+            st.write(f"- {m.get('name','')}: {m.get('dose','')} {m.get('frequency','')}".strip())
+with c3:
+    st.markdown("**Latest Labs**")
+    labs = data.get("labs") or []
+    if not labs:
+        st.write("—")
+    else:
+        last = labs[-1]
+        vals = last.get("values") or {}
+        lines = []
+        for k in ("creatinine_mg_dL","egfr_mL_min_1.73m2","a1c_percent","hemoglobin_g_dL","potassium_mmol_L","co2_bicarb_mmol_L","urine_acr_mg_g"):
+            if k in vals:
+                lines.append(f"- {k}: {vals[k]}")
+        st.write("\n".join(lines) if lines else "—")
 
-# Patient selector
-pid = st.text_input("Patient ID", "patient_001")
-col1, col2 = st.columns(2)
+st.markdown("---")
 
+# --- Recent window (last k entries/messages) ---
+st.markdown("### Recent activity")
+try:
+    window = _mem.get_window(pid, k=8)
+except AttributeError:
+    st.error("PatientMemory.get_window is missing. Please update utils/patient_memory.py from the latest code.")
+    st.stop()
 
-with col1:
-    st.subheader("View history")
-    if st.button("Load history"):
-        rec = get_patient_record(pid)
-        if rec:
-            st.json(rec)
-        else:
-            st.info("No record found.")
+if not window:
+    st.write("No recent entries.")
+else:
+    for role, content, ts in window:
+        # Simple role bubble
+        with st.chat_message("user" if role.lower() == "user" else "assistant"):
+            st.markdown(content)
+        st.caption(ts or "")
 
-    st.markdown("### Memory Summary")
-    if "patient_memory" not in st.session_state:
-        st.session_state.patient_memory = PatientMemory()
-    _mem = st.session_state.patient_memory
-    st.write(_mem.get_summary(pid) or "_No summary yet_")
-
-    st.markdown("### Recent Conversation (last 8 turns)")
-    for role, content, ts in _mem.get_window(pid, k=8):
-        st.write(f"- **{ts} [{role}]** {content}")
-
-with col2:
-    st.subheader("Add note")
-    note = st.text_area("New note (will be merged into record)")
-    if st.button("Save note"):
-        if note.strip():
-            update_patient_record(pid, {"latest_note": note.strip()})
-            st.success("Note saved.")
-        else:
-            st.info("Type a note first.")
-
-
+# --- Footer ---
+with st.expander("Technical details"):
+    st.write({
+        "OFFLINE_PATIENT_DIR": os.getenv("OFFLINE_PATIENT_DIR", "data/patient_memory"),
+        "Loaded patients": len(_mem.patients),
+    })
