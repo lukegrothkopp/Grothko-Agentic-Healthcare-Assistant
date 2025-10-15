@@ -16,7 +16,7 @@ for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY"):
 
 st.set_page_config(page_title="Patient Assistant", layout="wide")
 st.title("🩺 Patient Assistant")
-st.caption("Not medical advice. Provides high-level info and admin logistics only.")
+st.caption("Demo — not medical advice. Provides high-level info and admin logistics only.")
 
 # Build agent graph once
 if "graph" not in st.session_state:
@@ -97,4 +97,3 @@ if st.button("Book appointment", key="patient_book_btn"):
             mem.maybe_autosummarize(patient_id)
         except Exception as e:
             st.error(f"Failed: {e}")
-
