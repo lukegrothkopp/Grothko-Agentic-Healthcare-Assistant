@@ -232,16 +232,24 @@ with tab_schedule:
 
     cA, cB = st.columns([1, 1])
     with cA:
+        # Build options with a blank placeholder first
+        placeholder_option = "— Select a patient —"
+        no_patients_option = "— No patients loaded —"
+        options = ([placeholder_option] + pretty_labels) if pretty_labels else [no_patients_option]
+
         sel_label = st.selectbox(
             "Existing patient (optional)",
-            options=(pretty_labels if pretty_labels else ["(none available)"]),
-            index=(0 if pretty_labels else 0),
+            options=options,
+            index=0,                 # ← start on the placeholder (blank)
             disabled=(not pretty_labels),
             key="sched_patient_label",
         )
+
+        # Only set selected_pid when a real patient was picked
         selected_pid = None
-        if pretty_labels:
+        if pretty_labels and sel_label != placeholder_option:
             selected_pid = patients[pretty_labels.index(sel_label)]["patient_id"]
+
     with cB:
         full_name = st.text_input("Full name (type to add or match)", value="", key="sched_fullname")
 
