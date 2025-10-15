@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from agents.graph_agent import build_graph
 from utils.database_ops import get_patient_record, update_patient_record
+from utils.patient_memory import PatientMemory
 
 load_dotenv()
 for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "CLINICIAN_TOKEN"):
@@ -28,12 +29,23 @@ graph = build_graph(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 pid = st.text_input("Patient ID", "patient_001")
 col1, col2 = st.columns(2)
 
+
 with col1:
     st.subheader("View history")
     if st.button("Load history"):
         rec = get_patient_record(pid)
         if rec: st.json(rec)
         else: st.info("No record found.")
+
+    st.markdown("### Memory Summary")
+    if "patient_memory" not in st.session_state:
+        st.session_state.patient_memory = PatientMemory()
+    _mem = st.session_state.patient_memory
+    st.write(_mem.get_summary(pid) or "_No summary yet_")
+
+    st.markdown("### Recent Conversation (last 8 turns)")
+    for role, content, ts in _mem.get_window(pid, k=8):
+        st.write(f"- **{ts} [{role}]** {content}")
 
 with col2:
     st.subheader("Add note")
@@ -44,3 +56,4 @@ with col2:
             st.success("Note saved.")
         else:
             st.info("Type a note first.")
+
