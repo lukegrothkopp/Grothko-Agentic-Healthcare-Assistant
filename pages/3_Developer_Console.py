@@ -30,7 +30,7 @@ def _get_openai_key() -> str:
         pass
     return os.getenv("OPENAI_API_KEY", "").strip()
 
-st.set_page_config(page_title="Developer Console", layout="wide")
+st.set_page_config(page_title="Developer Console", page_icon="🧑🏽‍💻", layout="wide")
 st.title("🧑🏽‍💻 Developer Console")
 st.caption("For ops, QA, indexing, and diagnostics. Not visible to patients/clinicians.")
 
