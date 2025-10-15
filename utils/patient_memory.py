@@ -5,6 +5,7 @@
 # - simple search & booking preference helpers
 # - resolve_from_text() that handles "father/mother + age + condition"
 # - add_message() shim for legacy callers (maps to record_event)
+# - get_window() to return a recent conversational/event window for UI consoles
 
 from __future__ import annotations
 
@@ -205,25 +206,22 @@ class PatientMemory:
         mentions_fracture = ("fracture" in t) or ("buckle" in t) or ("broken arm" in t)
 
         # Heuristics:
-        # CKD father ~70 → likely CKD patient
         if is_father and mentions_ckd and (age is None or 65 <= age <= 80):
             for pid, data in self.patients.items():
                 if self._has_problem_keyword(data, ["chronic kidney disease"]):
                     return pid
 
-        # Knee mother ~50 → likely knee OA patient
         if is_mother and mentions_knee and (age is None or 45 <= age <= 60):
             for pid, data in self.patients.items():
                 if self._has_problem_keyword(data, ["knee", "osteoarthritis"]):
                     return pid
 
-        # Teens + fracture → adolescent ortho case
         if age is not None and 12 <= age <= 18 and mentions_fracture:
             for pid, data in self.patients.items():
                 if self._has_problem_keyword(data, ["fracture", "buckle", "radius"]):
                     return pid
 
-        # Generic fallbacks by condition
+        # Generic fallbacks
         if mentions_ckd:
             for pid, data in self.patients.items():
                 if self._has_problem_keyword(data, ["chronic kidney disease"]):
@@ -267,3 +265,36 @@ class PatientMemory:
             "date_range": {"start": start, "end": end},
         }
 
+    # ---------- NEW: conversational/event window for consoles ----------
+    def get_window(self, patient_id: str, k: int = 8) -> List[Tuple[str, str, str]]:
+        """
+        Return a list of (role, content, ts_iso) for the last k entries.
+        role is pulled from entry.meta.role when present; otherwise uses entry.type.
+        """
+        p = self.patients.get(patient_id) or {}
+        entries = list(p.get("entries", []))
+
+        def _parse_ts(ts: Any) -> datetime:
+            if not isinstance(ts, str):
+                return datetime.min
+            t = ts[:-1] if ts.endswith("Z") else ts
+            try:
+                return datetime.fromisoformat(t)
+            except Exception:
+                return datetime.min
+
+        entries.sort(key=lambda e: _parse_ts(e.get("ts")))
+        tail = entries[-max(1, int(k)):] if entries else []
+
+        out: List[Tuple[str, str, str]] = []
+        for e in tail:
+            meta = e.get("meta") or {}
+            role = meta.get("role") or (e.get("type") or "note")
+            text = e.get("text") or ""
+            # strip leading [user]/[assistant] tokens if present
+            m = re.match(r"^\[(user|assistant)\]\s*", text, flags=re.I)
+            if m:
+                text = text[m.end():]
+            ts = e.get("ts") or ""
+            out.append((str(role), str(text), str(ts)))
+        return out
