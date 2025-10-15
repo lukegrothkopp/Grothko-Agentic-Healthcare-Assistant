@@ -265,16 +265,19 @@ class PatientMemory:
             "date_range": {"start": start, "end": end},
         }
 
-    # ---------- NEW: conversational/event window for consoles ----------
-    def get_window(self, patient_id: str, k: int = 8) -> List[Tuple[str, str, str]]:
+    # ---------- Conversational/event window for consoles ----------
+    def get_window(self, patient_id: str, k: int = 8):
         """
-        Return a list of (role, content, ts_iso) for the last k entries.
-        role is pulled from entry.meta.role when present; otherwise uses entry.type.
+        Return the last k entries as (role, content, ts_iso).
+        role is taken from entry.meta.role when present; else uses entry.type.
         """
         p = self.patients.get(patient_id) or {}
         entries = list(p.get("entries", []))
 
-        def _parse_ts(ts: Any) -> datetime:
+        from datetime import datetime
+        import re as _re
+
+        def _parse_ts(ts):
             if not isinstance(ts, str):
                 return datetime.min
             t = ts[:-1] if ts.endswith("Z") else ts
@@ -286,15 +289,15 @@ class PatientMemory:
         entries.sort(key=lambda e: _parse_ts(e.get("ts")))
         tail = entries[-max(1, int(k)):] if entries else []
 
-        out: List[Tuple[str, str, str]] = []
+        out = []
         for e in tail:
             meta = e.get("meta") or {}
             role = meta.get("role") or (e.get("type") or "note")
             text = e.get("text") or ""
-            # strip leading [user]/[assistant] tokens if present
-            m = re.match(r"^\[(user|assistant)\]\s*", text, flags=re.I)
+            m = _re.match(r"^\[(user|assistant)\]\s*", text, flags=_re.I)
             if m:
                 text = text[m.end():]
             ts = e.get("ts") or ""
             out.append((str(role), str(text), str(ts)))
         return out
+
