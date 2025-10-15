@@ -1,0 +1,129 @@
+{
+  "patient_id": "patient_702",
+  "profile": {
+    "full_name": "Marisol Chen",
+    "dob": "1975-06-02",
+    "age": 50,
+    "sex": "female",
+    "contact": { "phone": "(555) 019-2202", "email": "marisol.chen@example.com" },
+    "address": "88 Cedar Street, Seattle, WA 98102",
+    "emergency_contact": { "name": "Daniel Chen", "relation": "spouse", "phone": "(555) 019-2203" }
+  },
+  "allergies": [
+    { "substance": "Penicillin", "reaction": "rash" }
+  ],
+  "problems": [
+    {
+      "name": "Chronic knee pain, osteoarthritis (L>R), intermittent effusions",
+      "codes": { "icd10": "M17.12" },
+      "status": "active",
+      "since": "2022-03-01",
+      "notes": "Pain worsens with stairs and prolonged standing; relief with rest, ice, topical NSAID."
+    },
+    {
+      "name": "Primary hypothyroidism",
+      "codes": { "icd10": "E03.9" },
+      "status": "active",
+      "since": "2018-05-01"
+    },
+    {
+      "name": "Obesity, class I (BMI ~30)",
+      "codes": { "icd10": "E66.9" },
+      "status": "active"
+    },
+    {
+      "name": "Seasonal allergic rhinitis",
+      "codes": { "icd10": "J30.2" },
+      "status": "active"
+    }
+  ],
+  "medications": [
+    { "name": "Levothyroxine", "dose": "88 mcg", "route": "PO", "frequency": "daily before breakfast", "status": "active" },
+    { "name": "Diclofenac 1% gel", "dose": "2 g", "route": "topical", "frequency": "QID to knees", "status": "active" },
+    { "name": "Naproxen", "dose": "250 mg", "route": "PO", "frequency": "BID PRN pain", "status": "as_needed", "notes": "Take with food; avoid if stomach upset" },
+    { "name": "Omeprazole", "dose": "20 mg", "route": "PO", "frequency": "daily", "status": "active", "notes": "GI protection when using NSAIDs as needed" }
+  ],
+  "vitals": [
+    { "date": "2025-10-05", "bp": "122/76", "hr_bpm": 70, "temp_c": 36.6, "weight_kg": 78, "height_cm": 160, "bmi": 30.5 }
+  ],
+  "labs": [
+    {
+      "date": "2025-09-25",
+      "values": {
+        "tsh_uIU_mL": 2.1,
+        "free_t4_ng_dL": 1.1,
+        "hgb_g_dL": 13.0,
+        "a1c_percent": 5.4,
+        "crp_mg_L": 3.2,
+        "lipids": { "ldl": 118, "hdl": 51, "triglycerides": 132 }
+      }
+    }
+  ],
+  "lab_trends": [
+    { "date": "2024-09-20", "tsh_uIU_mL": 7.2, "free_t4_ng_dL": 0.7 },
+    { "date": "2025-03-22", "tsh_uIU_mL": 3.0, "free_t4_ng_dL": 1.0 },
+    { "date": "2025-09-25", "tsh_uIU_mL": 2.1, "free_t4_ng_dL": 1.1 }
+  ],
+  "imaging": [
+    {
+      "date": "2025-09-20",
+      "modality": "X-ray knee (left)",
+      "result": "Mild medial compartment narrowing and small osteophytes; no fracture; small suprapatellar effusion."
+    }
+  ],
+  "care_team": {
+    "pcp": { "name": "Dr. Aisha Romero", "clinic": "Lakeside Primary Care", "phone": "(555) 019-2210" },
+    "preferred_specialist": { "specialty": "Orthopedics (Sports Medicine)", "suggested_name": "Dr. Kevin Park" },
+    "endocrinology": { "name": "Dr. Aria Patel", "clinic": "Endocrine Associates", "phone": "(555) 019-2301" }
+  },
+  "preferences": {
+    "appointment_modes": ["in-person", "video"],
+    "preferred_clinic": "Downtown Clinic",
+    "preferred_time_of_day": "afternoon",
+    "appointment_window_days": 10
+  },
+  "summary": "50-year-old woman with chronic left-predominant knee osteoarthritis and primary hypothyroidism (well-controlled on levothyroxine). Knee pain with stairs and prolonged standing; uses topical diclofenac, intermittent naproxen. Interested in Ortho/Sports Medicine visit at Downtown Clinic (afternoons; in-person preferred, video acceptable).",
+  "entries": [
+    {
+      "ts": "2025-10-05T11:30:00-07:00",
+      "type": "summary",
+      "text": "Chronic knee OA (L>R) with activity-related pain; hypothyroidism controlled (TSH 2.1, free T4 1.1). Prefers Downtown Clinic; afternoons; in-person or video.",
+      "meta": { "priority": "routine", "source": "PCP follow-up" }
+    },
+    {
+      "ts": "2025-09-20T15:10:00-07:00",
+      "type": "imaging",
+      "text": "Left knee X-ray: mild medial OA changes, small effusion.",
+      "meta": { "facility": "City Imaging Center" }
+    },
+    {
+      "ts": "2025-10-06T09:05:00-07:00",
+      "type": "booking_request",
+      "text": "Book Orthopedics/Sports Medicine within ~10 days at Downtown Clinic; afternoons; in-person preferred, video acceptable.",
+      "meta": {
+        "doctor_specialty": "Orthopedist (Sports Medicine)",
+        "doctor_name_hint": "Dr. Kevin Park",
+        "clinic": "Downtown Clinic",
+        "modes": ["in-person", "video"],
+        "preferred_time_of_day": "afternoon",
+        "date_range": { "start": "2025-10-07", "end": "2025-10-16" }
+      }
+    },
+    {
+      "ts": "2025-10-06T09:06:00-07:00",
+      "type": "kb_hint",
+      "text": "Knee OA nonoperative options + thyroid management: exercise therapy (quad/hip strengthening), weight management, topical NSAIDs vs oral NSAIDs, acetaminophen, short-term braces/taping, activity modification, intra-articular corticosteroids; role of hyaluronic acid varies. Hypothyroidism: TSH targets on levothyroxine, adherence, drug interactions.",
+      "meta": {
+        "query_suggestions": [
+          "knee osteoarthritis nonoperative management guideline 2024",
+          "topical NSAIDs vs oral NSAIDs knee OA evidence",
+          "intra-articular corticosteroid knee osteoarthritis 2024 consensus",
+          "weight loss exercise therapy knee OA randomized trial",
+          "hypothyroidism levothyroxine dosing monitoring TSH adult",
+          "drug interactions levothyroxine absorption"
+        ]
+      }
+    }
+  ],
+  "last_updated": "2025-10-15T10:20:00-07:00"
+}
