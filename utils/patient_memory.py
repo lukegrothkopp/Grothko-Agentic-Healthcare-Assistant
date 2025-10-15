@@ -1,140 +1,166 @@
 # utils/patient_memory.py
-import os, sqlite3, json, datetime
-from typing import List, Tuple, Optional
+# Lightweight in-memory patient store with seed auto-load, simple search, and text-based id resolution.
 
-# Optional LLM summary (OpenAI) if key present; fallback to heuristic
-def _summarize_with_llm(text: str) -> str:
-    key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not key:
-        # simple fallback: first 5 sentences
-        import re
-        sents = re.split(r"(?<=[.!?])\s+", text.strip())
-        return " ".join(sents[:5])
-    try:
-        from langchain_openai import ChatOpenAI
-        from langchain_core.messages import SystemMessage, HumanMessage
-        llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"), temperature=0)
-        prompt = [
-            SystemMessage(content="You are a clinical admin assistant. Summarize key admin-relevant facts only (who/what/when/where), no medical advice."),
-            HumanMessage(content=f"Conversation notes:\n{text}\n\nSummarize in 5-8 bullet points suitable to prime future admin tasks.")
-        ]
-        out = llm.invoke(prompt)
-        return out.content
-    except Exception:
-        return text[:1200]
+import os, json, re
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+
+SEED_DIR_ENV = "OFFLINE_PATIENT_DIR"
+DEFAULT_SEED_DIR = "data/patient_memory"
 
 class PatientMemory:
-    """SQLite-backed long-term memory for patient context."""
-    def __init__(self, db_path: str = "data/memory.db"):
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._init()
+    def __init__(self, seed_dir: Optional[str] = None):
+        self.seed_dir = seed_dir or os.getenv(SEED_DIR_ENV, DEFAULT_SEED_DIR)
+        self.patients: Dict[str, Dict[str, Any]] = {}
+        self._load_seed_records(self.seed_dir)
 
-    def _init(self):
-        cur = self.conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          patient_id TEXT, role TEXT, content TEXT, ts TEXT
-        )""")
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS summaries (
-          patient_id TEXT PRIMARY KEY, summary TEXT, ts TEXT
-        )""")
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS facts (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          patient_id TEXT, text TEXT, meta TEXT, ts TEXT
-        )""")
-        self.conn.commit()
-
-    # --------- Writes ----------
-    def add_message(self, patient_id: str, role: str, content: str):
-        ts = datetime.datetime.now().isoformat(timespec="seconds")
-        self.conn.execute(
-            "INSERT INTO messages(patient_id, role, content, ts) VALUES(?,?,?,?)",
-            (patient_id, role, content, ts)
-        )
-        self.conn.commit()
-
-    def record_event(self, patient_id: str, text: str, meta: Optional[dict] = None):
-        """For tool outputs (booking confirmations, etc.)."""
-        ts = datetime.datetime.now().isoformat(timespec="seconds")
-        self.conn.execute(
-            "INSERT INTO facts(patient_id, text, meta, ts) VALUES(?,?,?,?)",
-            (patient_id, text, json.dumps(meta or {}), ts)
-        )
-        # also store as a 'tool' message to keep chronology
-        self.conn.execute(
-            "INSERT INTO messages(patient_id, role, content, ts) VALUES(?,?,?,?)",
-            (patient_id, "tool", text, ts)
-        )
-        self.conn.commit()
-
-    def upsert_summary(self, patient_id: str, summary: str):
-        ts = datetime.datetime.now().isoformat(timespec="seconds")
-        self.conn.execute(
-            "INSERT INTO summaries(patient_id, summary, ts) VALUES(?,?,?) "
-            "ON CONFLICT(patient_id) DO UPDATE SET summary=excluded.summary, ts=excluded.ts",
-            (patient_id, summary, ts)
-        )
-        self.conn.commit()
-
-    # --------- Reads ----------
-    def get_window(self, patient_id: str, k: int = 8) -> List[Tuple[str, str, str]]:
-        """Return last k messages as (role, content, ts)."""
-        rows = self.conn.execute(
-            "SELECT role, content, ts FROM messages WHERE patient_id=? ORDER BY id DESC LIMIT ?",
-            (patient_id, k)
-        ).fetchall()
-        return list(reversed(rows))
-
-    def get_summary(self, patient_id: str) -> str:
-        row = self.conn.execute(
-            "SELECT summary FROM summaries WHERE patient_id=?",
-            (patient_id,)
-        ).fetchone()
-        return row[0] if row else ""
-
-    def dump_messages(self, patient_id: str, limit: int = 200) -> str:
-        rows = self.conn.execute(
-            "SELECT role, content FROM messages WHERE patient_id=? ORDER BY id ASC LIMIT ?",
-            (patient_id, limit)
-        ).fetchall()
-        return "\n".join(f"[{r}] {c}" for r, c in rows)
-
-    # --------- Semantic recall (TF-IDF; no key required) ----------
-    def search(self, patient_id: str, query: str, k: int = 3) -> list[str]:
-        rows = self.conn.execute(
-            "SELECT text FROM facts WHERE patient_id=? ORDER BY id DESC LIMIT 500",
-            (patient_id,)
-        ).fetchall()
-        corpus = [r[0] for r in rows]
-        if not corpus:
-            return []
+    # ---------- Seed loading ----------
+    def _load_seed_records(self, path: str) -> None:
         try:
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            from sklearn.metrics.pairwise import linear_kernel
+            os.makedirs(path, exist_ok=True)
         except Exception:
-            # fallback: contains-based naive ranking
-            q = query.lower()
-            hits = [t for t in corpus if q in t.lower()]
-            return hits[:k]
-        vec = TfidfVectorizer(stop_words="english")
-        X = vec.fit_transform(corpus)
-        qv = vec.transform([query])
-        sims = linear_kernel(qv, X).ravel()
-        idxs = sims.argsort()[::-1][:k]
-        return [corpus[i] for i in idxs if sims[i] > 0.0]
+            pass
+        for name in sorted(os.listdir(path)) if os.path.isdir(path) else []:
+            p = os.path.join(path, name)
+            if not os.path.isfile(p) or not name.lower().endswith(".json"):
+                continue
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                pid = str(data.get("patient_id") or "").strip()
+                if pid:
+                    self.patients[pid] = data
+            except Exception:
+                continue
 
-    # --------- Maintenance ----------
-    def maybe_autosummarize(self, patient_id: str, every_n: int = 12):
-        """Periodically condense long chat history into summary to keep prompts lean."""
-        count = self.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE patient_id=?", (patient_id,)
-        ).fetchone()[0]
-        if count == 0 or count % every_n != 0:
-            return
-        text = self.dump_messages(patient_id, limit=400)
-        summary = _summarize_with_llm(text)
-        self.upsert_summary(patient_id, summary)
+    # ---------- Core API ----------
+    def upsert_patient_json(self, data: Dict[str, Any]) -> None:
+        pid = str(data.get("patient_id") or "").strip()
+        if not pid:
+            raise ValueError("patient_id is required")
+        self.patients[pid] = data
+
+    def get(self, patient_id: str) -> Optional[Dict[str, Any]]:
+        return self.patients.get(patient_id)
+
+    def record_event(self, patient_id: str, text: str, meta: Optional[Dict[str, Any]] = None) -> None:
+        now = datetime.utcnow().isoformat() + "Z"
+        p = self.patients.setdefault(patient_id, {"patient_id": patient_id})
+        entries = p.setdefault("entries", [])
+        entries.append({"ts": now, "type": "note", "text": text, "meta": meta or {}})
+        p["last_updated"] = now
+
+    # ---------- Summaries & search ----------
+    def get_summary(self, patient_id: Optional[str]) -> str:
+        if not patient_id:
+            return ""
+        p = self.patients.get(patient_id)
+        if not p:
+            return ""
+        if isinstance(p.get("summary"), str) and p["summary"].strip():
+            return p["summary"]
+        # fallback brief synthetic summary
+        name = (p.get("profile") or {}).get("full_name") or patient_id
+        probs = ", ".join(q.get("name","") for q in p.get("problems", [])[:3] if q.get("name"))
+        return f"{name}: {probs}" if probs else name
+
+    def search(self, patient_id: Optional[str], query: str, k: int = 3) -> List[str]:
+        """Very simple relevance: look in entries, problems, meds, labs text fields."""
+        if not patient_id or not query or not isinstance(query, str):
+            return []
+        p = self.patients.get(patient_id)
+        if not p:
+            return []
+        q = query.lower()
+        hits: List[Tuple[int, str]] = []
+
+        def add_hit(weight: int, text: str):
+            if text and isinstance(text, str):
+                hits.append((weight, text))
+
+        # prioritize entries
+        for e in p.get("entries", []):
+            t = str(e.get("text") or "")
+            if q in t.lower():
+                add_hit(10, t)
+        # problems / meds
+        for prob in p.get("problems", []):
+            t = str(prob.get("name") or "")
+            if q in t.lower():
+                add_hit(7, f"Problem: {t}")
+        for med in p.get("medications", []):
+            t = str(med.get("name") or "")
+            if q in t.lower():
+                add_hit(4, f"Medication: {t}")
+        # labs summary lines
+        for lab in p.get("labs", []):
+            vals = lab.get("values", {})
+            line = []
+            for key in ("creatinine_mg_dL","egfr_mL_min_1.73m2","urine_acr_mg_g","a1c_percent","hemoglobin_g_dL","potassium_mmol_L","co2_bicarb_mmol_L"):
+                if key in vals:
+                    line.append(f"{key}={vals[key]}")
+            if line:
+                add_hit(5, "Labs: " + ", ".join(line))
+
+        # Keep top-k by weight & recency-ish order
+        hits.sort(key=lambda x: x[0], reverse=True)
+        out = [t for _, t in hits[:max(1,int(k))]]
+        return out
+
+    # ---------- Patient resolution from free text ----------
+    _AGE_RE = re.compile(r"\b(\d{2})-?year-?old\b|\bage\s+(\d{2})\b", re.I)
+    def resolve_from_text(self, text: str) -> Optional[str]:
+        """Heuristics to pick a patient from user text."""
+        if not text:
+            return None
+        t = text.lower()
+        # Direct ID mention
+        m = re.search(r"patient[_\s-]?(\d{3,})", t)
+        if m:
+            pid = f"patient_{m.group(1)}"
+            if pid in self.patients:
+                return pid
+        # Name mention
+        for pid, data in self.patients.items():
+            name = ((data.get("profile") or {}).get("full_name") or "").lower()
+            last = name.split()[-1] if name else ""
+            if name and (name in t or last and last in t):
+                return pid
+        # CKD father/70 heuristic (fits Hal)
+        if ("father" in t or "dad" in t) and ("kidney" in t or "ckd" in t):
+            # check for ~70
+            m2 = self._AGE_RE.search(t)
+            if m2:
+                age = m2.group(1) or m2.group(2)
+                try:
+                    if 68 <= int(age) <= 74:
+                        # prefer a CKD patient in store if present
+                        for pid, data in self.patients.items():
+                            probs = [p.get("name","").lower() for p in data.get("problems",[])]
+                            if any("chronic kidney disease" in x for x in probs):
+                                return pid
+                except Exception:
+                    pass
+            # fallback to any CKD
+            for pid, data in self.patients.items():
+                probs = [p.get("name","").lower() for p in data.get("problems",[])]
+                if any("chronic kidney disease" in x for x in probs):
+                    return pid
+        return None
+
+    # ---------- Preferences helpers ----------
+    def booking_hints(self, patient_id: Optional[str]) -> Dict[str, Any]:
+        if not patient_id:
+            return {}
+        p = self.patients.get(patient_id) or {}
+        prefs = p.get("preferences") or {}
+        # derive a suggested date within window (default 14 days)
+        days = int(prefs.get("appointment_window_days", 14) or 14)
+        start = (datetime.utcnow() + timedelta(days=1)).date().isoformat()
+        end = (datetime.utcnow() + timedelta(days=days)).date().isoformat()
+        return {
+            "clinic": prefs.get("preferred_clinic"),
+            "modes": prefs.get("appointment_modes", []),
+            "preferred_time_of_day": prefs.get("preferred_time_of_day"),
+            "date_range": {"start": start, "end": end}
+        }
