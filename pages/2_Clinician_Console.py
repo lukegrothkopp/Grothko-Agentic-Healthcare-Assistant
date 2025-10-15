@@ -34,8 +34,10 @@ with col1:
     st.subheader("View history")
     if st.button("Load history"):
         rec = get_patient_record(pid)
-        if rec: st.json(rec)
-        else: st.info("No record found.")
+        if rec:
+            st.json(rec)
+        else:
+            st.info("No record found.")
 
     st.markdown("### Memory Summary")
     if "patient_memory" not in st.session_state:
@@ -56,4 +58,5 @@ with col2:
             st.success("Note saved.")
         else:
             st.info("Type a note first.")
+
 
