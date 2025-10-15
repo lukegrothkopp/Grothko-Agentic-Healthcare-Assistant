@@ -25,6 +25,8 @@ graph = build_graph(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 with st.sidebar:
     st.header("Your Info")
     patient_id = st.text_input("Patient ID", "patient_001")
+    st.sidebar.markdown("### Context summary")
+    st.sidebar.write(mem.get_summary(patient_id) or "_No summary yet_")
     st.caption("Tip: You can use natural phrases like 'book a cardiologist next Monday'.")
 
 # Chat UI (patient only)
