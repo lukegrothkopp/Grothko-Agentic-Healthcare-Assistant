@@ -20,7 +20,7 @@ from utils.rag_pipeline import RAGPipeline
 from utils.patient_memory import PatientMemory
 
 # =========================
-# State (with safe reducers)
+# State
 # =========================
 
 class AgentState(TypedDict):
@@ -30,38 +30,31 @@ class AgentState(TypedDict):
     patient_id: Optional[str]
     plan: Annotated[List[str], list_concat]
 
-# =========================
-# Safety & planning helpers
-# =========================
-
 SYSTEM_SAFETY = (
     "You are a cautious healthcare admin/info assistant.\n"
     "- NEVER provide medical advice, diagnosis, or treatment instructions.\n"
     "- You summarize reputable sources and help with logistics (records, appointments).\n"
-    "- Be concise and clear. If a request is clinical, gently defer to a licensed clinician."
+    "- If a request is clinical, defer to a licensed clinician."
 )
-SAFETY_CORE = (
-    "You ONLY help with general information and admin tasks. "
-    "You never provide medical advice, diagnosis, or treatment."
-)
+
+SAFETY_CORE = "You ONLY help with general information and admin tasks. You never provide medical advice, diagnosis, or treatment."
+
 PLAN_TEMPLATE = (
     "Produce a minimal ordered list of actions the assistant should take given the user's message. "
-    "Valid steps are a subset of: ['search', 'records', 'booking', 'rag']. "
-    "Return only steps needed and nothing else."
+    "Valid steps: ['search', 'records', 'booking', 'rag']. Return only steps needed."
 )
 
 class PlanOut(BaseModel):
     steps: List[str] = Field(..., description="Ordered list of minimal steps")
 
 # =========================
-# Memory accessor
+# Memory singleton
 # =========================
-
 _MEM_SINGLETON: Optional[PatientMemory] = None
 def _mem() -> PatientMemory:
     global _MEM_SINGLETON
     if _MEM_SINGLETON is None:
-        _MEM_SINGLETON = PatientMemory()
+        _MEM_SINGLETON = PatientMemory()  # auto-loads data/patient_memory/*.json
     return _MEM_SINGLETON
 
 def memory_context_provider(patient_id: Optional[str], user_query: str, k: int = 3):
@@ -69,14 +62,13 @@ def memory_context_provider(patient_id: Optional[str], user_query: str, k: int =
     recalls = _mem().search(patient_id, user_query, k=k) if patient_id else []
     pre = (
         f"Patient context summary:\n{summary or '(none)'}\n\n"
-        + ("Relevant past entries:\n" + "\n".join(f"- {r}" for r in recalls) if recalls else "")
+        + ("Relevant past entries:\n" + "\n".join(f\"- {r}\" for r in recalls) if recalls else "")
     ).strip()
     return summary, recalls, pre
 
 # =========================
-# Intent & parsing helpers
+# Helpers
 # =========================
-
 def _classify_intent(text: str) -> str:
     t = (text or "").lower()
     if any(w in t for w in ["book", "schedule", "appointment"]): return "booking"
@@ -85,8 +77,7 @@ def _classify_intent(text: str) -> str:
     if any(w in t for w in ["info", "guideline", "treatment", "what is", "symptom", "disease", "condition"]): return "search"
     return "search"
 
-DATE_PAT = re.compile(r"(20\d{2}-\d{2}-\d{2})|((?:\d{1,2})/(?:\d{1,2})/(?:20\d{2}))", re.I)
-WEEKDAYS = {"monday":0,"tuesday":1,"wednesday":2,"thursday":3,"friday":4,"saturday":5,"sunday":6}
+DATE_PAT = re.compile(r"(20\\d{2}-\\d{2}-\\d{2})|((?:\\d{1,2})/(?:\\d{1,2})/(?:20\\d{2}))", re.I)
 
 def _parse_relative_date_phrase(text: str, today: Optional[date] = None) -> Optional[str]:
     if not text: return None
@@ -96,7 +87,7 @@ def _parse_relative_date_phrase(text: str, today: Optional[date] = None) -> Opti
     if t == "tomorrow": return (today + timedelta(days=1)).isoformat()
     m2 = re.search(r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", t)
     if m2:
-        wd = WEEKDAYS[m2.group(1)]
+        wd = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"].index(m2.group(1))
         days_ahead = (wd - today.weekday() + 7) % 7
         if days_ahead == 0: days_ahead = 7
         return (today + timedelta(days=days_ahead)).isoformat()
@@ -113,49 +104,53 @@ def _extract_date(text: str) -> Optional[str]:
     return _parse_relative_date_phrase(text)
 
 def _extract_doctor(text: str) -> Optional[str]:
-    m = re.search(r"Dr\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", text or "")
+    m = re.search(r"Dr\\.??\\s+([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)?)", text or "")
     if m: return m.group(1)
     t = (text or "").lower()
-    if "hypertension" in t: return "Hypertension Specialist (Cardiologist)"
-    if "kidney" in t or "nephro" in t: return "Nephrologist"
-    if any(x in t for x in ["foot","ankle"]): return "Podiatrist"
+    if "nephro" in t or "kidney" in t: return "Nephrologist"
+    if "hypertension" in t: return "Cardiologist"
     return "Primary Care"
 
-def _make_booking_payload(user_text: str, fallback_pid: Optional[str]) -> str:
+def _make_booking_payload(user_text: str, fallback_pid: Optional[str], hints: Dict[str, Any]) -> str:
     pid = fallback_pid or "patient_001"
-    m = re.search(r"patient[_\s-]?(\d{3,})", user_text or "", re.I)
-    if m:
-        pid = f"patient_{m.group(1)}"
     doc = _extract_doctor(user_text) or "Primary Care"
-    d_iso = _extract_date(user_text) or (date.today() + timedelta(days=7)).isoformat()
-    payload = {"patient_id": pid, "doctor_name": doc, "appointment_date": d_iso}
+    d_iso = _extract_date(user_text)
+    # if no explicit date, pick start of hint window
+    if not d_iso:
+        d_iso = (hints.get("date_range") or {}).get("start")
+    if not d_iso:
+        d_iso = (date.today() + timedelta(days=7)).isoformat()
+    payload = {
+        "patient_id": pid,
+        "doctor_name": doc,
+        "appointment_date": d_iso
+    }
+    # pass optional booking details if the tool accepts them
+    clinic = hints.get("clinic")
+    modes = hints.get("modes") or []
+    tod = hints.get("preferred_time_of_day")
+    if clinic: payload["clinic"] = clinic
+    if modes: payload["modes"] = modes
+    if tod: payload["preferred_time_of_day"] = tod
     return json.dumps(payload)
-
-# =========================
-# Array-safe helpers
-# =========================
 
 def _nonempty_str(s: Any) -> bool:
     return isinstance(s, str) and len(s.strip()) > 0
 
 # =========================
-# Graph
+# Build graph
 # =========================
-
-DISCLAIMER = (
-    "\n\n— This assistant shares general information only (not medical advice). "
-    "For severe, sudden, or worsening symptoms—or red flags like head injury, fever + stiff neck, "
-    "confusion, weakness, vision changes—seek licensed care or emergency services."
-)
+DISCLAIMER = ("\n\n— This assistant shares general information only (not medical advice). "
+              "For severe, sudden, or worsening symptoms—or red flags like head injury, fever + stiff neck, "
+              "confusion, weakness, vision changes—seek licensed care or emergency services.")
 
 def build_graph(model_name: str = "gpt-4o-mini"):
     key = os.getenv("OPENAI_API_KEY", "").strip()
-    has_key = bool(key)
-    llm = ChatOpenAI(model=model_name, temperature=0.1, api_key=key) if has_key else None
+    llm = ChatOpenAI(model=model_name, temperature=0.1, api_key=key) if key else None
     planner = llm.with_structured_output(PlanOut) if llm else None
 
     tools: List[Tool] = []
-    tools.append(get_medical_search_tool())   # <-- name now matches
+    tools.append(get_medical_search_tool())
     tools.extend(get_record_tools())
     tools.append(get_booking_tool())
     tools.append(get_offline_kb_tool())
@@ -169,44 +164,49 @@ def build_graph(model_name: str = "gpt-4o-mini"):
             return f"(RAG error) {e}"
         if not pairs:
             return "No local KB results."
-        lines: List[str] = [f"- {str(txt)[:400]} (score={float(score):.3f})" for txt, score in pairs]
-        out = "\n".join(lines).strip()
-        return out if _nonempty_str(out) else "No local KB results."
+        lines = [f"- {str(txt)[:400]} (score={float(score):.3f})" for txt, score in pairs]
+        return "\n".join(lines) or "No local KB results."
 
     graph = StateGraph(AgentState)
 
     # ---- Nodes ----
     def start(state: AgentState):
-        # Inject safety + memory context once as a SystemMessage
+        # Capture latest user text
         user_text = ""
         for m in reversed(state.get("messages", [])):
             if isinstance(m, HumanMessage):
-                user_text = m.content
-                break
-        _, _, pre = memory_context_provider(state.get("patient_id"), user_text, k=3)
-        sys_payload = (SYSTEM_SAFETY + "\n\n" + pre).strip()
+                user_text = m.content; break
 
+        # Auto-identify patient if missing
+        pid = state.get("patient_id")
+        if not pid:
+            pid = _mem().resolve_from_text(user_text)
+        out: Dict[str, Any] = {}
+        if pid and pid != state.get("patient_id"):
+            out["patient_id"] = pid
+
+        # Inject safety + memory context
+        _, _, pre = memory_context_provider(pid, user_text, k=3)
         already = any(
             isinstance(m, SystemMessage)
             and isinstance(getattr(m, "content", None), str)
             and SYSTEM_SAFETY.splitlines()[0] in m.content
             for m in state.get("messages", [])
         )
-        if already:
-            return {}
-        return {"messages": [SystemMessage(content=sys_payload)]}
+        if not already:
+            sys_payload = (SYSTEM_SAFETY + "\n\n" + pre).strip()
+            out.setdefault("messages", []).append(SystemMessage(content=sys_payload))
+        return out
 
     def plan(state: AgentState):
         user_text = ""
         for m in reversed(state.get("messages", [])):
             if isinstance(m, HumanMessage):
                 user_text = m.content; break
-        steps: List[str] = ["search"]
+        steps: List[str] = ["search", "booking"]  # default likely flow for this use case
         if planner and _nonempty_str(user_text):
-            prompt = [
-                SystemMessage(content=SAFETY_CORE),
-                HumanMessage(content=PLAN_TEMPLATE + "\n\nUser: " + user_text)
-            ]
+            prompt = [SystemMessage(content=SAFETY_CORE),
+                      HumanMessage(content=PLAN_TEMPLATE + "\n\nUser: " + user_text)]
             try:
                 out = planner.invoke(prompt)
                 if out and isinstance(out.steps, list) and len(out.steps) > 0:
@@ -227,52 +227,54 @@ def build_graph(model_name: str = "gpt-4o-mini"):
         for m in reversed(state.get("messages", [])):
             if isinstance(m, HumanMessage):
                 text = m.content; break
-        payload = _make_booking_payload(text, state.get("patient_id"))
+        pid = state.get("patient_id")
+        hints = _mem().booking_hints(pid)
+        payload = _make_booking_payload(text, pid, hints)
         res: Any = "Booking tool unavailable."
         for t in tools:
             if t.name == "Book Appointment":
                 res = t.func(payload); break
         res_str = res if isinstance(res, str) else json.dumps(res)
-        pid = state.get("patient_id") or json.loads(payload).get("patient_id")
         if pid:
             _mem().record_event(pid, f"[Booking] {res_str}", meta={"stage": "booking"})
-        return {"result": res_str, "messages": [AIMessage(content=res_str)]}
+        # include human-readable echo of prefs if we had them
+        prefs_note = ""
+        if hints:
+            clinic = hints.get("clinic")
+            modes = ", ".join(hints.get("modes", [])) if hints.get("modes") else ""
+            tod = hints.get("preferred_time_of_day")
+            extras = " | ".join([x for x in [f"clinic={clinic}" if clinic else None,
+                                             f"modes={modes}" if modes else None,
+                                             f"time={tod}" if tod else None] if x])
+            if extras:
+                prefs_note = f"\nPreferences: {extras}"
+        msg = res_str + prefs_note if prefs_note else res_str
+        return {"result": res_str, "messages": [AIMessage(content=msg)]}
 
     def do_records(state: AgentState):
-        text = ""
-        for m in reversed(state.get("messages", [])):
-            if isinstance(m, HumanMessage):
-                text = m.content; break
-        if any(w in (text or "").lower() for w in ["load","retrieve","show"]):
-            tool_name = "Retrieve Medical History"
-            input_payload = (state.get("patient_id") or "")
-        else:
-            tool_name = "Manage Medical Records"
-            pid = state.get("patient_id") or "patient_001"
-            input_payload = json.dumps({"patient_id": pid, "data": {"latest_note": text}})
-        res: Any = "Records tool unavailable."
-        for t in tools:
-            if t.name == tool_name:
-                res = t.func(input_payload); break
-        res_str = res if isinstance(res, str) else json.dumps(res)
-        return {"result": res_str, "messages": [AIMessage(content=res_str)]}
+        pid = state.get("patient_id")
+        if not pid:
+            return {"messages": [AIMessage(content="No patient identified for records retrieval.")]}
+        # Summarize key bits from memory
+        summary = _mem().get_summary(pid)
+        recalls = _mem().search(pid, "ckd", k=3)
+        text = f"Patient {pid} history:\n- {summary}\n" + ("\n".join(f"- {r}" for r in recalls) if recalls else "")
+        return {"result": text, "messages": [AIMessage(content=text)]}
 
     def do_search(state: AgentState):
         text = ""
         for m in reversed(state.get("messages", [])):
             if isinstance(m, HumanMessage):
                 text = m.content; break
-
         parts: List[str] = []
 
-        # 1) Offline KB (RAG)
+        # Offline KB
         rag_text = rag_retrieve(text)
-        if _nonempty_str(rag_text) and "No local KB results." not in rag_text:
+        if _nonempty_str(rag_text) and "No local KB results" not in rag_text:
             parts.append("**Offline KB**\n" + rag_text)
 
-        # 2) Online clinical search (trusted sites)
+        # Online trusted search
         online_text = ""
-        # Prefer exact tool name; else fall back to any tool with 'search' in name
         search_tools = [t for t in tools if t.name == "Clinical Search (SERP/DDG)"] or \
                        [t for t in tools if "search" in t.name.lower()]
         if search_tools:
@@ -293,9 +295,7 @@ def build_graph(model_name: str = "gpt-4o-mini"):
         for m in reversed(state.get("messages", [])):
             if isinstance(m, HumanMessage):
                 text = m.content; break
-        out = rag_retrieve(text)
-        if not _nonempty_str(out):
-            out = "No local KB results."
+        out = rag_retrieve(text) or "No local KB results."
         out += DISCLAIMER
         return {"result": out, "messages": [AIMessage(content=out)]}
 
@@ -308,7 +308,7 @@ def build_graph(model_name: str = "gpt-4o-mini"):
             return "search"
         return intent
 
-    # ---- Wire the graph ----
+    # ---- Wire graph ----
     graph.add_node("start", start)
     graph.add_node("plan", plan)
     graph.add_node("classify", classify)
