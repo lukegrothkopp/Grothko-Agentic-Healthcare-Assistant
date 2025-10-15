@@ -1,5 +1,6 @@
 # utils/patient_memory.py
-# Lightweight in-memory patient store with seed auto-load, simple search, and text-based id resolution.
+# Lightweight in-memory patient store with seed auto-load, simple search,
+# seed-dir knob OFFLINE_PATIENT_DIR, and small utilities used by the Console.
 
 import os, json, re
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,16 +13,22 @@ class PatientMemory:
     def __init__(self, seed_dir: Optional[str] = None):
         self.seed_dir = seed_dir or os.getenv(SEED_DIR_ENV, DEFAULT_SEED_DIR)
         self.patients: Dict[str, Dict[str, Any]] = {}
-        self._load_seed_records(self.seed_dir)
+        self.reload_from_dir(self.seed_dir)
 
-    # ---------- Seed loading ----------
-    def _load_seed_records(self, path: str) -> None:
+    # ---------- Seed loading / saving ----------
+    def reload_from_dir(self, path: Optional[str] = None) -> None:
+        """Clear and (re)load all patient JSON records from a folder."""
+        if path:
+            self.seed_dir = path
         try:
-            os.makedirs(path, exist_ok=True)
+            os.makedirs(self.seed_dir, exist_ok=True)
         except Exception:
             pass
-        for name in sorted(os.listdir(path)) if os.path.isdir(path) else []:
-            p = os.path.join(path, name)
+        self.patients.clear()
+        if not os.path.isdir(self.seed_dir):
+            return
+        for name in sorted(os.listdir(self.seed_dir)):
+            p = os.path.join(self.seed_dir, name)
             if not os.path.isfile(p) or not name.lower().endswith(".json"):
                 continue
             try:
@@ -32,6 +39,20 @@ class PatientMemory:
                     self.patients[pid] = data
             except Exception:
                 continue
+
+    def save_patient_json(self, data: Dict[str, Any], dir_path: Optional[str] = None) -> str:
+        """Write a single patient JSON to <dir>/<patient_id>.json and (re)load it."""
+        target_dir = dir_path or self.seed_dir
+        os.makedirs(target_dir, exist_ok=True)
+        pid = str(data.get("patient_id") or "").strip()
+        if not pid:
+            raise ValueError("patient_id is required")
+        out_path = os.path.join(target_dir, f"{pid}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        # refresh just this record
+        self.patients[pid] = data
+        return out_path
 
     # ---------- Core API ----------
     def upsert_patient_json(self, data: Dict[str, Any]) -> None:
@@ -59,7 +80,6 @@ class PatientMemory:
             return ""
         if isinstance(p.get("summary"), str) and p["summary"].strip():
             return p["summary"]
-        # fallback brief synthetic summary
         name = (p.get("profile") or {}).get("full_name") or patient_id
         probs = ", ".join(q.get("name","") for q in p.get("problems", [])[:3] if q.get("name"))
         return f"{name}: {probs}" if probs else name
@@ -78,7 +98,7 @@ class PatientMemory:
             if text and isinstance(text, str):
                 hits.append((weight, text))
 
-        # prioritize entries
+        # entries
         for e in p.get("entries", []):
             t = str(e.get("text") or "")
             if q in t.lower():
@@ -92,7 +112,7 @@ class PatientMemory:
             t = str(med.get("name") or "")
             if q in t.lower():
                 add_hit(4, f"Medication: {t}")
-        # labs summary lines
+        # labs summary
         for lab in p.get("labs", []):
             vals = lab.get("values", {})
             line = []
@@ -102,10 +122,8 @@ class PatientMemory:
             if line:
                 add_hit(5, "Labs: " + ", ".join(line))
 
-        # Keep top-k by weight & recency-ish order
         hits.sort(key=lambda x: x[0], reverse=True)
-        out = [t for _, t in hits[:max(1,int(k))]]
-        return out
+        return [t for _, t in hits[:max(1,int(k))]]
 
     # ---------- Patient resolution from free text ----------
     _AGE_RE = re.compile(r"\b(\d{2})-?year-?old\b|\bage\s+(\d{2})\b", re.I)
@@ -126,35 +144,46 @@ class PatientMemory:
             last = name.split()[-1] if name else ""
             if name and (name in t or last and last in t):
                 return pid
-        # CKD father/70 heuristic (fits Hal)
+        # CKD father/70 heuristic
         if ("father" in t or "dad" in t) and ("kidney" in t or "ckd" in t):
-            # check for ~70
             m2 = self._AGE_RE.search(t)
             if m2:
                 age = m2.group(1) or m2.group(2)
                 try:
                     if 68 <= int(age) <= 74:
-                        # prefer a CKD patient in store if present
                         for pid, data in self.patients.items():
                             probs = [p.get("name","").lower() for p in data.get("problems",[])]
                             if any("chronic kidney disease" in x for x in probs):
                                 return pid
                 except Exception:
                     pass
-            # fallback to any CKD
             for pid, data in self.patients.items():
                 probs = [p.get("name","").lower() for p in data.get("problems",[])]
                 if any("chronic kidney disease" in x for x in probs):
                     return pid
         return None
 
-    # ---------- Preferences helpers ----------
+    # ---------- Convenience for the Console ----------
+    def list_patients(self) -> List[Dict[str, Any]]:
+        """Return a compact list for preview: id, name, age, key problems, last_updated."""
+        out: List[Dict[str, Any]] = []
+        for pid, p in sorted(self.patients.items(), key=lambda kv: kv[0]):
+            prof = p.get("profile") or {}
+            probs = ", ".join(q.get("name","") for q in p.get("problems", [])[:3] if q.get("name"))
+            out.append({
+                "patient_id": pid,
+                "name": prof.get("full_name") or "",
+                "age": prof.get("age"),
+                "key_problems": probs,
+                "last_updated": p.get("last_updated", "")
+            })
+        return out
+
     def booking_hints(self, patient_id: Optional[str]) -> Dict[str, Any]:
         if not patient_id:
             return {}
         p = self.patients.get(patient_id) or {}
         prefs = p.get("preferences") or {}
-        # derive a suggested date within window (default 14 days)
         days = int(prefs.get("appointment_window_days", 14) or 14)
         start = (datetime.utcnow() + timedelta(days=1)).date().isoformat()
         end = (datetime.utcnow() + timedelta(days=days)).date().isoformat()
@@ -164,3 +193,4 @@ class PatientMemory:
             "preferred_time_of_day": prefs.get("preferred_time_of_day"),
             "date_range": {"start": start, "end": end}
         }
+
