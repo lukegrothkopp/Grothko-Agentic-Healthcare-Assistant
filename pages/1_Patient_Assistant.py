@@ -248,7 +248,17 @@ with tab_schedule:
     # Optional demographics (used if creating or updating)
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
-        dob = st.date_input("Date of birth (optional)", value=None, key="sched_dob")
+        know_dob = st.checkbox("I know the exact date of birth", key="sched_know_dob")
+        dob = None
+        if know_dob:
+            dob = st.date_input(
+                "Date of birth",
+                value=date(1980, 1, 1),   # placeholder default
+                min_value=date(1930, 1, 1),
+                max_value=date.today(),
+                key="sched_dob",
+                format="YYYY-MM-DD",
+            )
     with c2:
         age_input = st.number_input("Age (optional)", min_value=0, max_value=120, value=0, step=1, key="sched_age")
         age_val = int(age_input) if age_input else None
