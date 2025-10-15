@@ -277,6 +277,11 @@ def build_graph(model_name: str = "gpt-4o-mini"):
         return intent
 
     # Wire graph
+    graph.add_node("plan", plan)
+    graph.set_entry_point("start")
+    graph.add_edge("start", "plan")
+    graph.add_edge("plan", "classify")
+
     graph.add_node("start", start)
     graph.add_node("classify", classify)
     graph.add_node("booking", do_booking)
