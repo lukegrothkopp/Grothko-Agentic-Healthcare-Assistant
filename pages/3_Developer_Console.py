@@ -12,7 +12,7 @@ from langchain.evaluation import load_evaluator
 load_dotenv()  # local .env
 
 # Map Streamlit secrets -> env (Cloud)
-for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
+for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN", "OFFLINE_KB_DIR"):
     try:
         v = st.secrets.get(k)
         if v:
@@ -42,12 +42,56 @@ if required:
         st.warning("Enter a valid admin access code to view this console.")
         st.stop()
 
-# ---- RAG index builder ----
-st.subheader("RAG Index")
+# ---------------------------
+# Offline KB controls (TF-IDF)
+# ---------------------------
+st.markdown("### Offline KB (TF-IDF)")
+
+# Keep one RAG instance in session so changes persist
+if "rag" not in st.session_state:
+    st.session_state.rag = RAGPipeline()
+
+rag: RAGPipeline = st.session_state.rag
+
+# Show & set KB directory
+default_kb = os.environ.get("OFFLINE_KB_DIR", "data/offline_kb")
+kb_dir = st.text_input("KB directory (absolute or relative path)", value=rag.kb_dir or default_kb, key="kb_dir_input")
+cols = st.columns(3)
+with cols[0]:
+    if st.button("Apply & Rebuild (TF-IDF)"):
+        try:
+            os.environ["OFFLINE_KB_DIR"] = kb_dir
+            rag.set_kb_dir(kb_dir)   # also rebuilds index
+            st.success(f"Rebuilt index for: {rag.kb_dir}")
+        except Exception as e:
+            st.error(f"Rebuild failed: {e}")
+with cols[1]:
+    if st.button("Rebuild without changing path"):
+        try:
+            rag.rebuild_index()
+            st.success("Index rebuilt.")
+        except Exception as e:
+            st.error(f"Rebuild failed: {e}")
+with cols[2]:
+    if st.button("Show KB status"):
+        st.json(rag.status())
+
+# Quick status ribbon
+st.caption({
+    "backend": getattr(rag, "backend", getattr(rag, "backend_label", "unknown")),
+    "kb_dir": rag.kb_dir,
+    "docs_indexed": rag.status().get("num_docs", 0),
+    "file_types": rag.status().get("file_type_counts", {}),
+})
+
+# ---------------------------
+# RAG index builder (FAISS)
+# ---------------------------
+st.markdown("### Optional: Build FAISS index (OpenAI embeddings)")
 if st.button("Build FAISS index now"):
     key = _get_openai_key()
     if not key.startswith("sk-"):
-        st.warning("No valid OPENAI_API_KEY found; the app will use TF-IDF fallback.")
+        st.warning("No valid OPENAI_API_KEY found; the app will continue using TF-IDF.")
     else:
         with st.spinner("Building FAISS index…"):
             try:
@@ -56,15 +100,16 @@ if st.button("Build FAISS index now"):
             except Exception as e:
                 st.error(f"Failed to build: {e}")
 
-# ---- Probe the local KB (FAISS/TF-IDF) ----
+# ---------------------------
+# Probe the local KB
+# ---------------------------
 st.markdown("---")
 st.subheader("Probe the local KB")
 
 probe_q = st.text_input("Test a query against the local medical KB", "latest CKD treatments", key="kb_probe_q")
 if st.button("Retrieve top-3", key="kb_probe_btn"):
     try:
-        rag = RAGPipeline()
-        backend = getattr(rag, "backend", "unknown")
+        backend = getattr(rag, "backend", getattr(rag, "backend_label", "unknown"))
         is_faiss = (backend == "openai")
         label = "distance (lower=better)" if is_faiss else "similarity (higher=better)"
         st.caption(f"Backend in use: {backend} — showing {label}")
@@ -72,14 +117,27 @@ if st.button("Retrieve top-3", key="kb_probe_btn"):
         pairs = rag.retrieve(probe_q, k=3)
         if not pairs:
             st.info("No results from KB.")
+            st.write("**Diagnostics:**")
+            st.json(rag.status())
+            st.markdown(
+                "- Verify the **KB directory** points to your files.\n"
+                "- Ensure there are **text-bearing files** (.txt/.md/.pdf/.docx). "
+                "For .pdf/.docx, add optional deps: `PyPDF2`, `python-docx` (or `docx2txt`).\n"
+                "- Try a broader query (e.g., “chronic kidney disease treatments”) — "
+                "abbreviation expansion is enabled (`ckd` → “chronic kidney disease”), "
+                "but exact phrasing still matters.\n"
+                "- Click **Apply & Rebuild** after changing the folder."
+            )
         else:
             for i, (text, score) in enumerate(pairs, 1):
-                st.write(f"**{i}.** {label.split()[0]}={score:.4f}")
+                st.write(f"**{i}.** {label.split()[0]}={float(score):.4f}")
                 st.write(text[:1000] + ("…" if len(text) > 1000 else ""))
     except Exception as e:
         st.error(f"Probe failed: {e}")
 
-# ---- Q&A Eval (LLM-as-judge) with multi-file upload ----
+# ---------------------------
+# Q&A Eval (LLM-as-judge)
+# ---------------------------
 st.markdown("---")
 st.subheader("Q&A Eval (LLM-as-judge)")
 
@@ -127,7 +185,7 @@ def _parse_many(uploaded_files):
         examples, predictions = _parse_jsonl(content)
         merged_ex.extend([dict(item, __dataset=f.name) for item in examples])
         merged_pr.extend([dict(item, __dataset=f.name) for item in predictions])
-        f.seek(0)  # reset for reuse, if needed
+        f.seek(0)
     return merged_ex, merged_pr
 
 uploaded_files = st.file_uploader(
@@ -197,5 +255,6 @@ st.write({
     "OPENAI key detected": has_key,
     "Model": os.environ.get("OPENAI_MODEL"),
     "FAISS index exists": os.path.exists("vector_store/faiss_index.bin"),
+    "Offline KB dir": rag.kb_dir,
+    "Offline KB docs": rag.status().get("num_docs", 0),
 })
-
