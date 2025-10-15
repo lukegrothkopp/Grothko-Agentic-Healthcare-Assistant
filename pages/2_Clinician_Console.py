@@ -8,8 +8,8 @@ from utils.patient_memory import PatientMemory
 
 load_dotenv()
 
-st.set_page_config(page_title="Clinician Console", layout="wide")
-st.title("🩻 Clinician Console")
+st.set_page_config(page_title="Clinician Console", page_icon="👩🏼‍⚕️", layout="wide")
+st.title("👩🏼‍⚕️ Clinician Console")
 st.caption("Operational view of patient context, recent events, and quick actions.")
 
 # --- Singleton memory ---
