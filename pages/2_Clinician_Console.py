@@ -12,6 +12,25 @@ st.set_page_config(page_title="Clinician Console", page_icon="👩🏼‍⚕️"
 st.title("👩🏼‍⚕️ Clinician Console")
 st.caption("Operational view of patient context, recent events, and quick actions.")
 
+# ---- Access gate (Clinician) ----
+def _get_token(name: str) -> str:
+    try:
+        v = st.secrets.get(name)
+        if v:
+            return str(v).strip()
+    except Exception:
+        pass
+    return str(os.getenv(name, "")).strip()
+
+CLINICIAN_REQUIRED = _get_token("CLINICIAN_TOKEN")
+if CLINICIAN_REQUIRED:
+    with st.sidebar:
+        clinician_code = st.text_input("Clinician access code", type="password")
+    if (clinician_code or "").strip() != CLINICIAN_REQUIRED:
+        st.warning("Enter a valid clinician access code to view this console.")
+        st.stop()
+# ---- end access gate ----
+
 # --- Singleton memory ---
 if "pmemory" not in st.session_state:
     st.session_state.pmemory = PatientMemory()
