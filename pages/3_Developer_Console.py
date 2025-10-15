@@ -6,13 +6,14 @@ from dotenv import load_dotenv
 
 from generate_faiss_index import generate_index
 from utils.rag_pipeline import RAGPipeline
+from utils.patient_memory import PatientMemory
 from langchain_openai import ChatOpenAI
 from langchain.evaluation import load_evaluator
 
-load_dotenv()
+load_dotenv()  # local .env
 
 # Map Streamlit secrets -> env (Cloud)
-for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN", "OFFLINE_KB_DIR"):
+for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN", "OFFLINE_KB_DIR", "OFFLINE_PATIENT_DIR"):
     try:
         v = st.secrets.get(k)
         if v:
@@ -42,6 +43,97 @@ if required:
         st.stop()
 
 # ---------------------------
+# Patient Seeds (OFFLINE_PATIENT_DIR)
+# ---------------------------
+st.markdown("### Patient Seeds")
+
+if "pmemory" not in st.session_state:
+    st.session_state.pmemory = PatientMemory()
+
+pmemory: PatientMemory = st.session_state.pmemory
+
+seed_default = os.environ.get("OFFLINE_PATIENT_DIR", pmemory.seed_dir)
+seed_dir = st.text_input("Seed directory (OFFLINE_PATIENT_DIR)", value=seed_default, key="seed_dir_input")
+
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    if st.button("Apply & Reload Seeds"):
+        try:
+            os.environ["OFFLINE_PATIENT_DIR"] = seed_dir
+            pmemory.reload_from_dir(seed_dir)
+            st.success(f"Loaded {len(pmemory.patients)} patient(s) from {seed_dir}")
+        except Exception as e:
+            st.error(f"Reload failed: {e}")
+with c2:
+    if st.button("Create seed folder"):
+        try:
+            os.makedirs(seed_dir, exist_ok=True)
+            st.success(f"Created: {seed_dir}")
+        except Exception as e:
+            st.error(f"Create failed: {e}")
+with c3:
+    if st.button("Show loaded patients"):
+        data = pmemory.list_patients()
+        if data:
+            st.dataframe(pd.DataFrame(data), use_container_width=True, height=240)
+        else:
+            st.info("No patients loaded.")
+with c4:
+    if st.button("Show seed dir status"):
+        exists = os.path.isdir(seed_dir)
+        files = sorted([n for n in os.listdir(seed_dir)]) if exists else []
+        st.write({"exists": exists, "file_count": len(files)})
+        if files:
+            st.write(files[:20] + (["…"] if len(files) > 20 else []))
+
+st.markdown("**Import patient JSON (.json or .zip of many)** — records will be written into the seed directory above.")
+seed_file = st.file_uploader("Choose patient JSON or a .zip of JSONs", type=["json", "zip"], key="seed_uploader")
+if seed_file is not None and st.button("Import into Seeds"):
+    try:
+        os.makedirs(seed_dir, exist_ok=True)
+        imported = 0
+        if seed_file.type.endswith("zip"):
+            with zipfile.ZipFile(io.BytesIO(seed_file.read())) as z:
+                for name in z.namelist():
+                    if not name.lower().endswith(".json"):
+                        continue
+                    data = json.loads(z.read(name).decode("utf-8", errors="ignore"))
+                    # accept list, dict-with-patients, or single record
+                    records = []
+                    if isinstance(data, list):
+                        records = data
+                    elif isinstance(data, dict) and "patients" in data and isinstance(data["patients"], list):
+                        records = data["patients"]
+                    else:
+                        records = [data]
+                    for rec in records:
+                        pmemory.save_patient_json(rec, dir_path=seed_dir)
+                        imported += 1
+        else:
+            data = json.loads(seed_file.read().decode("utf-8", errors="ignore"))
+            records = []
+            if isinstance(data, list):
+                records = data
+            elif isinstance(data, dict) and "patients" in data and isinstance(data["patients"], list):
+                records = data["patients"]
+            else:
+                records = [data]
+            for rec in records:
+                pmemory.save_patient_json(rec, dir_path=seed_dir)
+                imported += 1
+        # reload index
+        pmemory.reload_from_dir(seed_dir)
+        st.success(f"Imported {imported} patient record(s) into {seed_dir}")
+        st.dataframe(pd.DataFrame(pmemory.list_patients()), use_container_width=True, height=240)
+    except Exception as e:
+        st.error(f"Import failed: {e}")
+
+st.caption({
+    "OFFLINE_PATIENT_DIR": os.environ.get("OFFLINE_PATIENT_DIR", pmemory.seed_dir),
+    "loaded_patients": len(pmemory.patients),
+})
+
+# ---------------------------
 # Offline KB (TF-IDF)
 # ---------------------------
 st.markdown("### Offline KB (TF-IDF)")
@@ -51,27 +143,27 @@ if "rag" not in st.session_state:
 
 rag: RAGPipeline = st.session_state.rag
 
-default_kb = os.environ.get("OFFLINE_KB_DIR", "data/offline_kb")
-kb_dir = st.text_input("KB directory (absolute or relative path)", value=rag.kb_dir or default_kb, key="kb_dir_input")
+default_kb = os.environ.get("OFFLINE_KB_DIR", rag.kb_dir)
+kb_dir = st.text_input("KB directory (OFFLINE_KB_DIR)", value=default_kb, key="kb_dir_input")
 
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     if st.button("Apply & Rebuild (TF-IDF)"):
         try:
             os.environ["OFFLINE_KB_DIR"] = kb_dir
-            rag.set_kb_dir(kb_dir)
+            rag.set_kb_dir(kb_dir)   # also rebuilds index
             st.success(f"Rebuilt index for: {rag.kb_dir}")
         except Exception as e:
             st.error(f"Rebuild failed: {e}")
 with c2:
-    if st.button("Rebuild without changing path"):
+    if st.button("Rebuild KB"):
         try:
             rag.rebuild_index()
             st.success("Index rebuilt.")
         except Exception as e:
             st.error(f"Rebuild failed: {e}")
 with c3:
-    if st.button("Create folder now"):
+    if st.button("Create KB folder"):
         try:
             os.makedirs(kb_dir, exist_ok=True)
             st.success(f"Created: {kb_dir}")
@@ -81,9 +173,8 @@ with c4:
     if st.button("Show KB status"):
         st.json(rag.status())
 
-# Upload a zipped KB and auto-index it
 st.markdown("**Upload KB (.zip)** — contents will be extracted into the KB directory above and indexed.")
-uploaded_zip = st.file_uploader("Choose a .zip with .txt/.md/.pdf/.docx files", type=["zip"])
+uploaded_zip = st.file_uploader("Choose a .zip with .txt/.md/.pdf/.docx/.json files", type=["zip"])
 if uploaded_zip is not None and st.button("Import ZIP into KB"):
     try:
         os.makedirs(kb_dir, exist_ok=True)
@@ -95,7 +186,6 @@ if uploaded_zip is not None and st.button("Import ZIP into KB"):
     except Exception as e:
         st.error(f"Import failed: {e}")
 
-# Quick status ribbon
 st.caption({
     "backend": getattr(rag, "backend", getattr(rag, "backend_label", "unknown")),
     "kb_dir": rag.kb_dir,
@@ -139,8 +229,8 @@ if st.button("Retrieve top-3", key="kb_probe_btn"):
             st.write("**Diagnostics:**")
             st.json(rag.status())
             st.markdown(
-                "- Ensure the KB directory contains **text-bearing files** (.txt/.md/.pdf/.docx).\n"
-                "- For .pdf/.docx, add optional deps: `PyPDF2`, `python-docx` (or `docx2txt`).\n"
+                "- Ensure the KB directory contains **text-bearing files** (.txt/.md/.pdf/.docx/.json).\n"
+                "- For .pdf/.docx, optional deps: `PyPDF2`, `python-docx` (or `docx2txt`).\n"
                 "- Try a broader query (e.g., “chronic kidney disease treatments”).\n"
                 "- After uploading a ZIP or changing the path, click **Apply & Rebuild**."
             )
@@ -268,10 +358,11 @@ if uploaded_files and st.button("Run Evaluation"):
 st.markdown("---")
 st.subheader("Diagnostics")
 st.write({
-    "OPENAI key detected": _get_openai_key().startswith("sk-"),
+    "OPENAI key detected": has_key,
     "Model": os.environ.get("OPENAI_MODEL"),
     "FAISS index exists": os.path.exists("vector_store/faiss_index.bin"),
     "Offline KB dir": rag.kb_dir,
     "Offline KB docs": rag.status().get("num_docs", 0),
+    "OFFLINE_PATIENT_DIR": os.environ.get("OFFLINE_PATIENT_DIR", pmemory.seed_dir),
+    "Loaded patients": len(pmemory.patients),
 })
-
