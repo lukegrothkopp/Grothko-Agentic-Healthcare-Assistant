@@ -1,99 +1,73 @@
-import os, json
+# pages/1_Patient_Assistant.py
+import os
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
+
+from langchain_core.messages import HumanMessage, AIMessage
 from agents.graph_agent import build_graph
 from utils.patient_memory import PatientMemory
 
 load_dotenv()
-# Map secrets -> env for Streamlit Cloud
-for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY"):
-    try:
-        if k in st.secrets and st.secrets[k]:
-            os.environ[k] = str(st.secrets[k]).strip()
-    except Exception:
-        pass
 
 st.set_page_config(page_title="Patient Assistant", layout="wide")
 st.title("🩺 Patient Assistant")
-st.caption("Not medical advice. Provides high-level info and admin logistics only.")
+st.caption("Ask for help with scheduling, records, and general info from trusted sources. (No medical advice.)")
 
-# Build agent graph once
+# Singleton-ish
 if "graph" not in st.session_state:
-    st.session_state.graph = build_graph(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+    st.session_state.graph = build_graph()
+if "pmemory" not in st.session_state:
+    st.session_state.pmemory = PatientMemory()
+
 graph = st.session_state.graph
+mem = st.session_state.pmemory
 
-# Patient memory (singleton)
-if "patient_memory" not in st.session_state:
-    st.session_state.patient_memory = PatientMemory()
-mem = st.session_state.patient_memory
+# Query box
+prompt = st.text_input("How can I help you today?", placeholder="e.g., I need to get an appointment for my 50 year old mother's knee issue")
 
-# Sidebar: patient info + memory summary
-with st.sidebar:
-    st.header("Your Info")
-    patient_id = st.text_input("Patient ID", "patient_001")
-    st.caption("Tip: Try phrases like “book a cardiologist next Monday”.")
-    st.markdown("---")
-    st.subheader("Context summary")
-    st.write(mem.get_summary(patient_id) or "_No summary yet_")
+col1, col2 = st.columns([1,1])
+with col1:
+    run_btn = st.button("Submit")
+with col2:
+    clear_btn = st.button("Clear")
 
-# Chat UI
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+if clear_btn:
+    st.session_state.pop("last_response", None)
+    st.rerun()
 
-for m in st.session_state.messages:
-    with st.chat_message(m["role"]):
-        st.markdown(m["content"])
+if run_btn and prompt.strip():
+    # Resolve patient id from free text (will pick patient_702 for 50-yo mother with knee issue)
+    pid = mem.resolve_from_text(prompt) or "session"
 
-if prompt := st.chat_input("How can I help you today?"):
-    # log user turn
-    mem.add_message(patient_id, "user", prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    # Log user message (legacy call now supported)
+    mem.add_message(pid, "user", prompt)
 
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking…"):
-            try:
-                state = {
-                    "messages": [HumanMessage(content=prompt)],
-                    "intent": None,
-                    "result": None,
-                    "patient_id": patient_id,
-                }
-                result_state = graph.invoke(state)
-                answer = result_state["messages"][-1].content
-            except Exception as e:
-                answer = f"Sorry—there was an error: {e}"
-            st.markdown(answer)
+    # Run the agent graph
+    try:
+        state_in = {"messages": [HumanMessage(content=prompt)], "patient_id": pid}
+        state_out = graph.invoke(state_in)
 
-    # log assistant turn + maybe summarize
-    mem.add_message(patient_id, "assistant", answer)
-    mem.maybe_autosummarize(patient_id)
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+        # Prefer the last AI message; fall back to 'result'
+        assistant_text = ""
+        msgs = state_out.get("messages", [])
+        for m in reversed(msgs):
+            if isinstance(m, AIMessage):
+                assistant_text = m.content
+                break
+        if not assistant_text:
+            assistant_text = state_out.get("result", "") or "(no result returned)"
 
-st.markdown("---")
-st.subheader("Book an appointment (natural language)")
-nl_booking = st.text_input(
-    "Describe the appointment",
-    value="Book a hypertension follow-up next Monday",
-    key="patient_booking_text",
-)
-if st.button("Book appointment", key="patient_book_btn"):
-    with st.spinner("Booking…"):
-        try:
-            state = {
-                "messages": [HumanMessage(content=nl_booking)],
-                "intent": None,
-                "result": None,
-                "patient_id": patient_id,
-            }
-            result_state = graph.invoke(state)
-            msg = result_state["messages"][-1].content
-            st.success(msg)
-            # record booking event & assistant reply
-            mem.record_event(patient_id, f"[Booking] {msg}", meta={"source": "patient_page"})
-            mem.add_message(patient_id, "assistant", msg)
-            mem.maybe_autosummarize(patient_id)
-        except Exception as e:
-            st.error(f"Failed: {e}")
+        # Log assistant message
+        mem.add_message(pid, "assistant", assistant_text)
+
+        # Show result
+        st.session_state.last_response = assistant_text
+        st.success(f"Patient: {pid}")
+        st.write(assistant_text)
+
+    except Exception as e:
+        st.error(f"Run failed: {e}")
+
+# Show the last answer (if any) on reload
+if st.session_state.get("last_response"):
+    st.write(st.session_state.last_response)
