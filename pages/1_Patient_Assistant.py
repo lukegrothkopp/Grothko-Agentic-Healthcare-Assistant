@@ -233,7 +233,7 @@ with tab_schedule:
     cA, cB = st.columns([1, 1])
     with cA:
         # Build options with a blank placeholder first
-        placeholder_option = "— Select a patient —"
+        placeholder_option = "— Current Patient List —"
         no_patients_option = "— No patients loaded —"
         options = ([placeholder_option] + pretty_labels) if pretty_labels else [no_patients_option]
 
