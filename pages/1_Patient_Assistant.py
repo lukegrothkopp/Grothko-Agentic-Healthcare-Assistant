@@ -16,8 +16,8 @@ from tools.booking_tool import get_booking_tool
 
 load_dotenv()
 
-st.set_page_config(page_title="Patient Assistant", layout="wide")
-st.title("🩺 Patient Assistant")
+st.set_page_config(page_title="Patient Assistant", page_icon="🧍🏽", layout="wide")
+st.title("🧍🏽 Patient Assistant")
 st.caption("Ask for help with scheduling, records, and general info from trusted sources. (Won't provide medical advice)")
 
 # --- Singletons ---
