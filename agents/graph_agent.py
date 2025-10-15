@@ -14,6 +14,16 @@ from tools.offline_kb_tool import get_offline_kb_tool
 from utils.rag_pipeline import RAGPipeline
 from utils.patient_memory import PatientMemory
 
+from prompts.prompt_templates import (
+    SAFETY_CORE, MEMORY_STUB, PLAN_TEMPLATE, SEARCH_SUMMARY_TEMPLATE,
+    BOOKING_EXTRACT_TEMPLATE, RECORDS_ACTION_TEMPLATE
+)
+from pydantic import BaseModel, Field
+from typing import List
+
+class PlanOut(BaseModel):
+    steps: List[str] = Field(..., description="Ordered list of minimal steps")
+
 SYSTEM_SAFETY = (
     """You are a cautious healthcare admin/info assistant.
 - NEVER provide medical advice, diagnosis, or treatment instructions.
