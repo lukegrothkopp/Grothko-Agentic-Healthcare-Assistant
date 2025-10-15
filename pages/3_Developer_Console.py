@@ -34,13 +34,24 @@ st.set_page_config(page_title="Developer Console", page_icon="🧑🏽‍💻", 
 st.title("🧑🏽‍💻 Developer Console")
 st.caption("For ops, QA, indexing, and diagnostics. Not visible to patients/clinicians.")
 
-# Optional access gating
-required = os.environ.get("ADMIN_TOKEN") or (getattr(st, "secrets", {}).get("ADMIN_TOKEN") if hasattr(st, "secrets") else "")
-if required:
-    code = st.sidebar.text_input("Access code", type="password")
-    if code.strip() != str(required).strip():
+# ---- Access gate (Developer) ----
+def _get_token(name: str) -> str:
+    try:
+        v = st.secrets.get(name)
+        if v:
+            return str(v).strip()
+    except Exception:
+        pass
+    return str(os.getenv(name, "")).strip()
+
+ADMIN_REQUIRED = _get_token("ADMIN_TOKEN")
+if ADMIN_REQUIRED:
+    with st.sidebar:
+        admin_code = st.text_input("Developer access code", type="password")
+    if (admin_code or "").strip() != ADMIN_REQUIRED:
         st.warning("Enter a valid admin access code to view this console.")
         st.stop()
+# ---- end access gate ----
 
 # ---------------------------
 # Patient Seeds (OFFLINE_PATIENT_DIR)
