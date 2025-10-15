@@ -7,7 +7,13 @@ from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage, AIMessage
 from agents.graph_agent import build_graph
+
+# --- robust import & reload to avoid stale class versions in Streamlit ---
+from importlib import reload
+import utils.patient_memory as _pm_mod
+reload(_pm_mod)  # ensure we see latest PatientMemory implementation
 from utils.patient_memory import PatientMemory
+
 from tools.booking_tool import get_booking_tool
 
 load_dotenv()
@@ -16,10 +22,11 @@ st.set_page_config(page_title="Patient Assistant", layout="wide")
 st.title("🩺 Patient Assistant")
 st.caption("Ask for help with scheduling, records, and general info from trusted sources. (No medical advice.)")
 
-# --- Singletons ---
+# --- Singletons (defensively create or refresh if missing methods) ---
 if "graph" not in st.session_state:
     st.session_state.graph = build_graph()  # works with/without OPENAI key
-if "pmemory" not in st.session_state:
+if "pmemory" not in st.session_state or not hasattr(st.session_state.get("pmemory"), "add_message"):
+    # Recreate memory if it's missing the legacy-compatible add_message shim
     st.session_state.pmemory = PatientMemory()
 if "booking_tool" not in st.session_state:
     st.session_state.booking_tool = get_booking_tool()
@@ -27,6 +34,18 @@ if "booking_tool" not in st.session_state:
 graph = st.session_state.graph
 mem = st.session_state.pmemory
 booking_tool = st.session_state.booking_tool
+
+def _safe_log(pid: str, role: str, content: str):
+    """Log to PatientMemory regardless of whether add_message exists."""
+    pid = pid or "session"
+    try:
+        if hasattr(mem, "add_message"):
+            mem.add_message(pid, role, content)
+        else:
+            mem.record_event(pid, f"[{role}] {content}", meta={"role": role})
+    except Exception:
+        # Don't crash UI if logging fails
+        pass
 
 # --- Tabs ---
 tab_general, tab_schedule = st.tabs(["General Assistant", "Quick Schedule"])
@@ -55,7 +74,7 @@ with tab_general:
     if run_btn and prompt.strip():
         # Resolve patient id from free text (Hal/Marisol/Ethan if their seeds are present)
         pid = mem.resolve_from_text(prompt) or "session"
-        mem.add_message(pid, "user", prompt)  # legacy-compatible shim
+        _safe_log(pid, "user", prompt)
 
         try:
             state_in = {"messages": [HumanMessage(content=prompt)], "patient_id": pid}
@@ -71,7 +90,7 @@ with tab_general:
             if not assistant_text:
                 assistant_text = state_out.get("result", "") or "(no result returned)"
 
-            mem.add_message(pid, "assistant", assistant_text)
+            _safe_log(pid, "assistant", assistant_text)
             st.session_state.last_response_general = assistant_text
             st.session_state.last_patient_general = pid
 
@@ -103,7 +122,6 @@ with tab_schedule:
             "or use the Developer Console → Patient Seeds to import JSON."
         )
 
-    # Default selection: first patient if available
     sel_ix = 0 if patients else None
     sel_label = st.selectbox(
         "Patient",
@@ -140,7 +158,7 @@ with tab_schedule:
         key="sched_tod",
     )
 
-    # Default date: start of suggested date_range if present, else today+7
+    # Default date: start of suggested date_range if present, else today
     try:
         start_iso = (hints.get("date_range") or {}).get("start")
         default_date = date.fromisoformat(start_iso) if start_iso else date.today()
@@ -153,10 +171,9 @@ with tab_schedule:
     book_clicked = st.button("Book Appointment", type="primary", disabled=not pid, key="sched_submit")
 
     if book_clicked and pid:
-        # Build payload (JSON string expected by booking tool)
         payload = {
             "patient_id": pid,
-            "doctor_name": doctor_name.strip() or "Primary Care",
+            "doctor_name": (doctor_name or "Primary Care").strip(),
             "appointment_date": appt_date.isoformat(),
         }
         if clinic.strip():
@@ -173,9 +190,8 @@ with tab_schedule:
             result_str = result if isinstance(result, str) else json.dumps(result)
             st.success("Booking request sent.")
             st.code(result_str, language="json")
-            # Log into patient memory
-            mem.add_message(pid, "user", f"[QuickSchedule] {json.dumps(payload)}")
-            mem.add_message(pid, "assistant", f"[QuickSchedule Result] {result_str}")
+            _safe_log(pid, "user", f"[QuickSchedule] {json.dumps(payload)}")
+            _safe_log(pid, "assistant", f"[QuickSchedule Result] {result_str}")
         except Exception as e:
             st.error(f"Booking failed: {e}")
 
@@ -184,4 +200,5 @@ with st.expander("Technical details"):
     st.write({
         "OFFLINE_PATIENT_DIR": os.getenv("OFFLINE_PATIENT_DIR", "data/patient_memory"),
         "Patients loaded": len(mem.patients),
+        "PatientMemory_has_add_message": hasattr(mem, "add_message"),
     })
