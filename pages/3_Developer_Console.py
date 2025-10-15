@@ -9,7 +9,7 @@ from utils.rag_pipeline import RAGPipeline
 from langchain_openai import ChatOpenAI
 from langchain.evaluation import load_evaluator
 
-load_dotenv()  # local .env
+load_dotenv()
 
 # Map Streamlit secrets -> env (Cloud)
 for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN", "OFFLINE_KB_DIR"):
@@ -21,7 +21,6 @@ for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN", "O
         pass
 
 def _get_openai_key() -> str:
-    """Prefer Streamlit secrets; fall back to environment."""
     try:
         v = st.secrets.get("OPENAI_API_KEY")
         if v:
@@ -43,38 +42,58 @@ if required:
         st.stop()
 
 # ---------------------------
-# Offline KB controls (TF-IDF)
+# Offline KB (TF-IDF)
 # ---------------------------
 st.markdown("### Offline KB (TF-IDF)")
 
-# Keep one RAG instance in session so changes persist
 if "rag" not in st.session_state:
     st.session_state.rag = RAGPipeline()
 
 rag: RAGPipeline = st.session_state.rag
 
-# Show & set KB directory
 default_kb = os.environ.get("OFFLINE_KB_DIR", "data/offline_kb")
 kb_dir = st.text_input("KB directory (absolute or relative path)", value=rag.kb_dir or default_kb, key="kb_dir_input")
-cols = st.columns(3)
-with cols[0]:
+
+c1, c2, c3, c4 = st.columns(4)
+with c1:
     if st.button("Apply & Rebuild (TF-IDF)"):
         try:
             os.environ["OFFLINE_KB_DIR"] = kb_dir
-            rag.set_kb_dir(kb_dir)   # also rebuilds index
+            rag.set_kb_dir(kb_dir)
             st.success(f"Rebuilt index for: {rag.kb_dir}")
         except Exception as e:
             st.error(f"Rebuild failed: {e}")
-with cols[1]:
+with c2:
     if st.button("Rebuild without changing path"):
         try:
             rag.rebuild_index()
             st.success("Index rebuilt.")
         except Exception as e:
             st.error(f"Rebuild failed: {e}")
-with cols[2]:
+with c3:
+    if st.button("Create folder now"):
+        try:
+            os.makedirs(kb_dir, exist_ok=True)
+            st.success(f"Created: {kb_dir}")
+        except Exception as e:
+            st.error(f"Create failed: {e}")
+with c4:
     if st.button("Show KB status"):
         st.json(rag.status())
+
+# Upload a zipped KB and auto-index it
+st.markdown("**Upload KB (.zip)** — contents will be extracted into the KB directory above and indexed.")
+uploaded_zip = st.file_uploader("Choose a .zip with .txt/.md/.pdf/.docx files", type=["zip"])
+if uploaded_zip is not None and st.button("Import ZIP into KB"):
+    try:
+        os.makedirs(kb_dir, exist_ok=True)
+        with zipfile.ZipFile(io.BytesIO(uploaded_zip.read())) as z:
+            z.extractall(kb_dir)
+        rag.set_kb_dir(kb_dir)  # rebuilds index
+        st.success(f"Imported ZIP into {kb_dir}. Docs indexed: {rag.status().get('num_docs', 0)}")
+        st.json(rag.status())
+    except Exception as e:
+        st.error(f"Import failed: {e}")
 
 # Quick status ribbon
 st.caption({
@@ -85,7 +104,7 @@ st.caption({
 })
 
 # ---------------------------
-# RAG index builder (FAISS)
+# Optional: Build FAISS index (OpenAI embeddings)
 # ---------------------------
 st.markdown("### Optional: Build FAISS index (OpenAI embeddings)")
 if st.button("Build FAISS index now"):
@@ -120,13 +139,10 @@ if st.button("Retrieve top-3", key="kb_probe_btn"):
             st.write("**Diagnostics:**")
             st.json(rag.status())
             st.markdown(
-                "- Verify the **KB directory** points to your files.\n"
-                "- Ensure there are **text-bearing files** (.txt/.md/.pdf/.docx). "
-                "For .pdf/.docx, add optional deps: `PyPDF2`, `python-docx` (or `docx2txt`).\n"
-                "- Try a broader query (e.g., “chronic kidney disease treatments”) — "
-                "abbreviation expansion is enabled (`ckd` → “chronic kidney disease”), "
-                "but exact phrasing still matters.\n"
-                "- Click **Apply & Rebuild** after changing the folder."
+                "- Ensure the KB directory contains **text-bearing files** (.txt/.md/.pdf/.docx).\n"
+                "- For .pdf/.docx, add optional deps: `PyPDF2`, `python-docx` (or `docx2txt`).\n"
+                "- Try a broader query (e.g., “chronic kidney disease treatments”).\n"
+                "- After uploading a ZIP or changing the path, click **Apply & Rebuild**."
             )
         else:
             for i, (text, score) in enumerate(pairs, 1):
@@ -252,9 +268,10 @@ if uploaded_files and st.button("Run Evaluation"):
 st.markdown("---")
 st.subheader("Diagnostics")
 st.write({
-    "OPENAI key detected": has_key,
+    "OPENAI key detected": _get_openai_key().startswith("sk-"),
     "Model": os.environ.get("OPENAI_MODEL"),
     "FAISS index exists": os.path.exists("vector_store/faiss_index.bin"),
     "Offline KB dir": rag.kb_dir,
     "Offline KB docs": rag.status().get("num_docs", 0),
 })
+
