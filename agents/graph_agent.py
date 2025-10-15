@@ -122,6 +122,9 @@ def build_graph(model_name: str = "gpt-4o-mini"):
     key = os.getenv("OPENAI_API_KEY", "").strip()
     has_key = key.startswith("sk-")
     llm = ChatOpenAI(model=model_name, temperature=0.1, api_key=key) if has_key else None
+    planner = None
+    if llm:
+        planner = llm.with_structured_output(PlanOut)
 
     tools: List[Tool] = []
     tools.append(get_medical_search_tool())
@@ -158,6 +161,29 @@ def build_graph(model_name: str = "gpt-4o-mini"):
         state["messages"] = msgs
         return state
 
+    def plan(state: AgentState) -> AgentState:
+        if not isinstance(state.get("messages"), list):
+            return state
+        # Grab last user text
+        user_text = ""
+        for m in reversed(state["messages"]):
+            if isinstance(m, HumanMessage):
+                user_text = m.content; break
+        steps = ["search"]  # sensible default
+        if planner and user_text:
+            prompt = [
+                SystemMessage(content=SAFETY_CORE),
+                HumanMessage(content=PLAN_TEMPLATE + "\n\nUser: " + user_text)
+            ]
+            try:
+                out = planner.invoke(prompt)
+                if out and out.steps:
+                    steps = out.steps
+            except Exception:
+                pass
+        state["plan"] = steps
+        return state
+    
     def classify(state: AgentState) -> AgentState:
         # assume last human message as text to classify
         text = ""
