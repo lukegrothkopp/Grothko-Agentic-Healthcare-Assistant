@@ -1,7 +1,7 @@
 import os, json, re
 from datetime import date, timedelta
 from operator import add as list_concat
-from typing import TypedDict, List, Optional, Tuple, Any
+from typing import TypedDict, List, Optional, Any
 from typing_extensions import Annotated
 
 from pydantic import BaseModel, Field
@@ -19,20 +19,16 @@ from tools.offline_kb_tool import get_offline_kb_tool
 from utils.rag_pipeline import RAGPipeline
 from utils.patient_memory import PatientMemory
 
-
 # =========================
 # State (with safe reducers)
 # =========================
 
 class AgentState(TypedDict):
-    # Multiple nodes can write in the same step; messages are appended safely.
     messages: Annotated[List[AnyMessage], add_messages]
     intent: Optional[str]
     result: Optional[str]
     patient_id: Optional[str]
-    # Optional planning field (concatenates if written by >1 node)
     plan: Annotated[List[str], list_concat]
-
 
 # =========================
 # Safety & planning helpers
@@ -44,12 +40,10 @@ SYSTEM_SAFETY = (
     "- You summarize reputable sources and help with logistics (records, appointments).\n"
     "- Be concise and clear. If a request is clinical, gently defer to a licensed clinician."
 )
-
 SAFETY_CORE = (
     "You ONLY help with general information and admin tasks. "
     "You never provide medical advice, diagnosis, or treatment."
 )
-
 PLAN_TEMPLATE = (
     "Produce a minimal ordered list of actions the assistant should take given the user's message. "
     "Valid steps are a subset of: ['search', 'records', 'booking', 'rag']. "
@@ -58,7 +52,6 @@ PLAN_TEMPLATE = (
 
 class PlanOut(BaseModel):
     steps: List[str] = Field(..., description="Ordered list of minimal steps")
-
 
 # =========================
 # Memory accessor
@@ -72,7 +65,6 @@ def _mem() -> PatientMemory:
     return _MEM_SINGLETON
 
 def memory_context_provider(patient_id: Optional[str], user_query: str, k: int = 3):
-    """Return (summary, recalls, preamble_text) for system injection."""
     summary = _mem().get_summary(patient_id) if patient_id else ""
     recalls = _mem().search(patient_id, user_query, k=k) if patient_id else []
     pre = (
@@ -80,7 +72,6 @@ def memory_context_provider(patient_id: Optional[str], user_query: str, k: int =
         + ("Relevant past entries:\n" + "\n".join(f"- {r}" for r in recalls) if recalls else "")
     ).strip()
     return summary, recalls, pre
-
 
 # =========================
 # Intent & parsing helpers
@@ -97,17 +88,12 @@ def _classify_intent(text: str) -> str:
 DATE_PAT = re.compile(r"(20\d{2}-\d{2}-\d{2})|((?:\d{1,2})/(?:\d{1,2})/(?:20\d{2}))", re.I)
 WEEKDAYS = {"monday":0,"tuesday":1,"wednesday":2,"thursday":3,"friday":4,"saturday":5,"sunday":6}
 
-def _next_weekday(target_idx: int, today: date) -> date:
-    days_ahead = (target_idx - today.weekday() + 7) % 7
-    if days_ahead == 0: days_ahead = 7
-    return today + timedelta(days=days_ahead)
-
 def _parse_relative_date_phrase(text: str, today: Optional[date] = None) -> Optional[str]:
     if not text: return None
     t = text.lower().strip()
     today = today or date.today()
-    if t in {"today"}: return today.isoformat()
-    if t in {"tomorrow"}: return (today + timedelta(days=1)).isoformat()
+    if t == "today": return today.isoformat()
+    if t == "tomorrow": return (today + timedelta(days=1)).isoformat()
     m2 = re.search(r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", t)
     if m2:
         wd = WEEKDAYS[m2.group(1)]
@@ -136,53 +122,40 @@ def _extract_doctor(text: str) -> Optional[str]:
     return "Primary Care"
 
 def _make_booking_payload(user_text: str, fallback_pid: Optional[str]) -> str:
-    pid = None
+    pid = fallback_pid or "patient_001"
     m = re.search(r"patient[_\s-]?(\d{3,})", user_text or "", re.I)
     if m:
         pid = f"patient_{m.group(1)}"
-    pid = pid or fallback_pid or "patient_001"
     doc = _extract_doctor(user_text) or "Primary Care"
     d_iso = _extract_date(user_text) or (date.today() + timedelta(days=7)).isoformat()
     payload = {"patient_id": pid, "doctor_name": doc, "appointment_date": d_iso}
     return json.dumps(payload)
 
-
 # =========================
 # Array-safe helpers
 # =========================
 
-def _to_list(obj: Any) -> List[Any]:
-    """Normalize arrays/iterables into a plain Python list."""
-    if obj is None:
-        return []
-    try:
-        import numpy as np  # optional
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-    except Exception:
-        pass
-    if isinstance(obj, (list, tuple)):
-        return list(obj)
-    # Fallback: wrap singletons
-    return [obj]
-
 def _nonempty_str(s: Any) -> bool:
-    """True iff s is a non-empty string after stripping."""
     return isinstance(s, str) and len(s.strip()) > 0
-
 
 # =========================
 # Graph
 # =========================
 
+DISCLAIMER = (
+    "\n\n— This assistant shares general information only (not medical advice). "
+    "For severe, sudden, or worsening symptoms—or red flags like head injury, fever + stiff neck, "
+    "confusion, weakness, vision changes—seek licensed care or emergency services."
+)
+
 def build_graph(model_name: str = "gpt-4o-mini"):
     key = os.getenv("OPENAI_API_KEY", "").strip()
-    has_key = key.startswith("sk-")
+    has_key = bool(key)
     llm = ChatOpenAI(model=model_name, temperature=0.1, api_key=key) if has_key else None
     planner = llm.with_structured_output(PlanOut) if llm else None
 
     tools: List[Tool] = []
-    tools.append(get_medical_search_tool())
+    tools.append(get_medical_search_tool())   # <-- name now matches
     tools.extend(get_record_tools())
     tools.append(get_booking_tool())
     tools.append(get_offline_kb_tool())
@@ -190,28 +163,13 @@ def build_graph(model_name: str = "gpt-4o-mini"):
     rag = RAGPipeline()
 
     def rag_retrieve(q: str) -> str:
-        """
-        Always return a STRING. Safely normalizes any array-like results to avoid
-        'truth value of an array is ambiguous' errors.
-        """
         try:
             pairs = rag.retrieve(q, k=3)
         except Exception as e:
             return f"(RAG error) {e}"
-
-        items = _to_list(pairs)
-        if len(items) == 0:
+        if not pairs:
             return "No local KB results."
-
-        lines: List[str] = []
-        for it in items:
-            # Expect (text, score) or just text
-            text: str
-            if isinstance(it, (list, tuple)) and len(it) >= 1:
-                text = str(it[0])
-            else:
-                text = str(it)
-            lines.append(f"- {text[:400]}")
+        lines: List[str] = [f"- {str(txt)[:400]} (score={float(score):.3f})" for txt, score in pairs]
         out = "\n".join(lines).strip()
         return out if _nonempty_str(out) else "No local KB results."
 
@@ -274,7 +232,6 @@ def build_graph(model_name: str = "gpt-4o-mini"):
         for t in tools:
             if t.name == "Book Appointment":
                 res = t.func(payload); break
-        # Normalize to string
         res_str = res if isinstance(res, str) else json.dumps(res)
         pid = state.get("patient_id") or json.loads(payload).get("patient_id")
         if pid:
@@ -306,24 +263,29 @@ def build_graph(model_name: str = "gpt-4o-mini"):
             if isinstance(m, HumanMessage):
                 text = m.content; break
 
-        # First: local RAG (always returns a string)
+        parts: List[str] = []
+
+        # 1) Offline KB (RAG)
         rag_text = rag_retrieve(text)
-        out = rag_text if _nonempty_str(rag_text) else "No local KB results."
+        if _nonempty_str(rag_text) and "No local KB results." not in rag_text:
+            parts.append("**Offline KB**\n" + rag_text)
 
-        # Second: clinical search tool (guard outputs to string)
-        for t in tools:
-            if t.name == "Clinical Search (SERP/DDG)":
-                try:
-                    res2 = t.func(text)
-                    res2_str = res2 if isinstance(res2, str) else json.dumps(res2)
-                    if _nonempty_str(res2_str):
-                        out = (out + "\n\n" + res2_str) if _nonempty_str(out) else res2_str
-                except Exception:
-                    pass
-                break
+        # 2) Online clinical search (trusted sites)
+        online_text = ""
+        # Prefer exact tool name; else fall back to any tool with 'search' in name
+        search_tools = [t for t in tools if t.name == "Clinical Search (SERP/DDG)"] or \
+                       [t for t in tools if "search" in t.name.lower()]
+        if search_tools:
+            try:
+                res2 = search_tools[0].func(text)
+                online_text = res2 if isinstance(res2, str) else json.dumps(res2)
+            except Exception as e:
+                online_text = f"(online search error) {e}"
+        if _nonempty_str(online_text):
+            parts.append("**Trusted online sources**\n" + online_text)
 
-        if not _nonempty_str(out):
-            out = "No results."
+        out = "\n\n".join(parts) if parts else "No results."
+        out += DISCLAIMER
         return {"result": out, "messages": [AIMessage(content=out)]}
 
     def do_rag(state: AgentState):
@@ -332,7 +294,9 @@ def build_graph(model_name: str = "gpt-4o-mini"):
             if isinstance(m, HumanMessage):
                 text = m.content; break
         out = rag_retrieve(text)
-        out = out if _nonempty_str(out) else "No local KB results."
+        if not _nonempty_str(out):
+            out = "No local KB results."
+        out += DISCLAIMER
         return {"result": out, "messages": [AIMessage(content=out)]}
 
     def finalize(state: AgentState):
@@ -344,7 +308,7 @@ def build_graph(model_name: str = "gpt-4o-mini"):
             return "search"
         return intent
 
-    # ---- Wire the graph (sequential; no unintended parallel branches) ----
+    # ---- Wire the graph ----
     graph.add_node("start", start)
     graph.add_node("plan", plan)
     graph.add_node("classify", classify)
