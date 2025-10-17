@@ -1,12 +1,17 @@
-# pages/3_Developer_Console.py
+# pages/3_Developer_Console.py  (merged superset: seeds + KB mgmt + FAISS + probe + eval + metrics + KB summary)
 import os, io, json, zipfile
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+# App features
+from utils.metrics import get_metrics_summary, iter_traces
 from generate_faiss_index import generate_index
 from utils.rag_pipeline import RAGPipeline
 from utils.patient_memory import PatientMemory
+
+# Optional evaluation (LLM-as-judge)
 from langchain_openai import ChatOpenAI
 from langchain.evaluation import load_evaluator
 
@@ -30,11 +35,6 @@ def _get_openai_key() -> str:
         pass
     return os.getenv("OPENAI_API_KEY", "").strip()
 
-st.set_page_config(page_title="Developer Console", page_icon="🧑🏽‍💻", layout="wide")
-st.title("🧑🏽‍💻 Developer Console")
-st.caption("For ops, QA, indexing, and diagnostics. Not visible to patients/clinicians.")
-
-# ---- Access gate (Developer) ----
 def _get_token(name: str) -> str:
     try:
         v = st.secrets.get(name)
@@ -44,6 +44,11 @@ def _get_token(name: str) -> str:
         pass
     return str(os.getenv(name, "")).strip()
 
+st.set_page_config(page_title="Developer Console", page_icon="🧑🏽‍💻", layout="wide")
+st.title("🧑🏽‍💻 Developer Console")
+st.caption("For ops, QA, indexing, diagnostics. Not visible to patients/clinicians.")
+
+# ---- Access gate (Developer) ----
 ADMIN_REQUIRED = _get_token("ADMIN_TOKEN")
 if ADMIN_REQUIRED:
     with st.sidebar:
@@ -52,6 +57,21 @@ if ADMIN_REQUIRED:
         st.warning("Enter a valid admin access code to view this console.")
         st.stop()
 # ---- end access gate ----
+
+# ---------------------------
+# Latest retrieved medical info (Offline KB summary)
+# ---------------------------
+st.markdown("### Latest retrieved medical information (offline KB)")
+LAST = Path("data/last_retrieved.json")
+if LAST.exists():
+    data = json.loads(LAST.read_text(encoding="utf-8"))
+    st.write("**Query:**", data.get("query"))
+    st.markdown("**Result:**")
+    st.code(data.get("result", "")[:4000])
+else:
+    st.info("No KB retrievals logged yet. Use the Patient page or Offline KB tool.")
+
+st.markdown("---")
 
 # ---------------------------
 # Patient Seeds (OFFLINE_PATIENT_DIR)
@@ -144,6 +164,8 @@ st.caption({
     "loaded_patients": len(pmemory.patients),
 })
 
+st.markdown("---")
+
 # ---------------------------
 # Offline KB (TF-IDF)
 # ---------------------------
@@ -204,6 +226,8 @@ st.caption({
     "file_types": rag.status().get("file_type_counts", {}),
 })
 
+st.markdown("---")
+
 # ---------------------------
 # Optional: Build FAISS index (OpenAI embeddings)
 # ---------------------------
@@ -220,10 +244,11 @@ if st.button("Build FAISS index now"):
             except Exception as e:
                 st.error(f"Failed to build: {e}")
 
+st.markdown("---")
+
 # ---------------------------
 # Probe the local KB
 # ---------------------------
-st.markdown("---")
 st.subheader("Probe the local KB")
 
 probe_q = st.text_input("Test a query against the local medical KB", "latest CKD treatments", key="kb_probe_q")
@@ -252,10 +277,11 @@ if st.button("Retrieve top-3", key="kb_probe_btn"):
     except Exception as e:
         st.error(f"Probe failed: {e}")
 
-# ---------------------------
-# Q&A Eval (LLM-as-judge)
-# ---------------------------
 st.markdown("---")
+
+# ---------------------------
+# Q&A Eval (LLM-as-judge) — supports multiple JSONL
+# ---------------------------
 st.subheader("Q&A Eval (LLM-as-judge)")
 
 def _parse_jsonl(s: str):
@@ -284,26 +310,27 @@ def _f1_local(pred: str, gold: str) -> float:
     rec  = tp / len(g) if g else 0.0
     return (2*prec*rec/(prec+rec)) if (prec+rec) else 0.0
 
-def _local_eval_table(examples, predictions):
+def _local_eval_table(examples, predictions, dataset_name=""):
     rows = []
     for ex, pr in zip(examples, predictions):
         q, gold, pred = ex["query"], ex["answer"], pr["result"]
         score = _f1_local(pred or "", gold or "")
         rows.append({
+            "dataset": dataset_name,
             "query": q, "prediction": pred, "gold": gold,
             "score": round(score, 3), "why": "Local token F1 overlap (no LLM key)."
         })
     return rows
 
-def _parse_many(uploaded_files):
-    merged_ex, merged_pr = [], []
-    for f in uploaded_files:
+def _parse_many(files):
+    all_examples, all_predictions = [], []
+    for f in files:
         content = f.read().decode("utf-8", errors="ignore")
-        examples, predictions = _parse_jsonl(content)
-        merged_ex.extend([dict(item, __dataset=f.name) for item in examples])
-        merged_pr.extend([dict(item, __dataset=f.name) for item in predictions])
+        ex, pr = _parse_jsonl(content)
+        all_examples.append((f.name, ex))
+        all_predictions.append((f.name, pr))
         f.seek(0)
-    return merged_ex, merged_pr
+    return all_examples, all_predictions
 
 uploaded_files = st.file_uploader(
     "Upload one or more JSONL files (fields: query, answer, result)",
@@ -316,7 +343,7 @@ model_name = st.text_input("LLM model", os.environ.get("OPENAI_MODEL", "gpt-4o-m
 
 if uploaded_files and st.button("Run Evaluation"):
     try:
-        ex_all, pr_all = _parse_many(uploaded_files)
+        all_ex, all_pr = _parse_many(uploaded_files)
     except Exception as e:
         st.error(f"Parse error: {e}")
         st.stop()
@@ -327,22 +354,35 @@ if uploaded_files and st.button("Run Evaluation"):
             try:
                 llm = ChatOpenAI(model=model_name, temperature=0)
                 evaluator = load_evaluator("qa", llm=llm)
-                results = evaluator.evaluate(ex_all, pr_all)
-                for ex, pr, r in zip(ex_all, pr_all, results):
+                # flatten with dataset tag
+                examples = []
+                predictions = []
+                for (name_e, ex), (name_p, pr) in zip(all_ex, all_pr):
+                    # names should align in same order
+                    for x in ex:
+                        x["__dataset"] = name_e
+                    for y in pr:
+                        y["__dataset"] = name_p
+                    examples.extend(ex)
+                    predictions.extend(pr)
+                results = evaluator.evaluate(examples, predictions)
+                for ex, pr, r in zip(examples, predictions, results):
                     rows.append({
                         "dataset": ex.get("__dataset", ""),
-                        "query": ex["query"],
-                        "prediction": pr["result"],
-                        "gold": ex["answer"],
+                        "query": ex["query"], "prediction": pr["result"], "gold": ex["answer"],
                         "judgment": r.get("score") or r.get("label") or "",
                         "why": (r.get("text") or "").strip(),
                     })
             except Exception as e:
                 st.error(f"LLM eval failed: {e}")
-                rows = _local_eval_table(ex_all, pr_all)
+                # fallback local per dataset
+                for (name, ex), (_, pr) in zip(all_ex, all_pr):
+                    rows.extend(_local_eval_table(ex, pr, dataset_name=name))
         else:
-            rows = _local_eval_table(ex_all, pr_all)
+            for (name, ex), (_, pr) in zip(all_ex, all_pr):
+                rows.extend(_local_eval_table(ex, pr, dataset_name=name))
 
+    import pandas as pd
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, height=420)
 
@@ -365,11 +405,27 @@ if uploaded_files and st.button("Run Evaluation"):
         mime="text/csv",
     )
 
+st.markdown("---")
+
+# ---------------------------
+# Metrics & Traces
+# ---------------------------
+st.subheader("Metrics & Traces")
+summary = get_metrics_summary()
+st.json(summary)
+
+st.markdown("### Recent traces")
+rows = iter_traces(limit=200)
+if rows:
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=420)
+else:
+    st.info("No traces yet. Interact with the app to generate activity.")
+
 # ---- Diagnostics ----
 st.markdown("---")
 st.subheader("Diagnostics")
 st.write({
-    "OPENAI key detected": has_key,
+    "OPENAI key detected": _get_openai_key().startswith("sk-"),
     "Model": os.environ.get("OPENAI_MODEL"),
     "FAISS index exists": os.path.exists("vector_store/faiss_index.bin"),
     "Offline KB dir": rag.kb_dir,
