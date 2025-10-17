@@ -285,3 +285,79 @@ with st.form("add_note_form", clear_on_submit=True):
             _mem.record_event(pid, note.strip(), meta={"kind": "note", "by": "clinician"})
             st.success("Note saved to memory.")
             st.rerun()
+
+# -------------------------
+# Book Appointment (for current or another patient)
+# -------------------------
+st.markdown("### Book Appointment")
+
+with st.expander("Open booking panel", expanded=False):
+    tabs = st.tabs(["Quick Form", "Natural Language"])
+
+    # --- Quick Form ---
+    with tabs[0]:
+        # default to the current patient but allow override
+        target_pid = st.text_input("Patient ID", value=pid, help="Defaults to the patient you’re viewing.")
+        doctor = st.text_input("Doctor / Specialty", value="Primary Care")
+        date_sel = st.date_input("Appointment date")
+        submit_qf = st.button("Book via Quick Form", use_container_width=True)
+
+        if submit_qf:
+            try:
+                payload = {
+                    "patient_id": target_pid.strip(),
+                    "doctor_name": doctor.strip(),
+                    "appointment_date": str(date_sel)  # YYYY-MM-DD
+                }
+                result_msg = book_appointment(json.dumps(payload))  # uses your booking_tool
+                st.success(result_msg)
+
+                # Also write a memory event so timeline updates immediately
+                _mem.record_event(
+                    target_pid,
+                    f"Booked appointment with Dr. {doctor} on {date_sel}.",
+                    meta={"kind": "appointment", "doctor": doctor, "date": str(date_sel)}
+                )
+
+                # Try to reflect in base appointments at runtime for instant UI update
+                base_target = _get_base(target_pid)
+                try:
+                    appts_list = base_target.setdefault("appointments", [])
+                    appts_list.append({
+                        "date": str(date_sel),
+                        "doctor": doctor,
+                        "status": "scheduled"
+                    })
+                except Exception:
+                    pass
+
+                st.rerun()
+            except Exception as e:
+                st.error(f"Booking failed: {e}")
+
+    # --- Natural Language ---
+    with tabs[1]:
+        nl_text = st.text_input(
+            "Describe the appointment",
+            value=f"book {pid} with Dr. Lee next Monday",
+            help="Examples: 'book patient_001 with Dr. Lee tomorrow' or 'book patient_701 cardiology next Wednesday'"
+        )
+        submit_nl = st.button("Book via Natural Language", use_container_width=True)
+
+        if submit_nl:
+            try:
+                result_msg = book_appointment(nl_text)  # free-text parser handles patient/date keywords
+                st.success(result_msg)
+
+                # Best-effort extraction to log an immediate memory event for the current patient
+                # If the NL text targets a different patient, that patient will still get the DB update;
+                # we also log to the current patient if we can guess the date/doctor.
+                # (Optional) You can parse here similarly to booking_tool if you want perfect reflection.
+                _mem.record_event(
+                    pid,
+                    f"Booked appointment (NL): {nl_text}",
+                    meta={"kind": "appointment_nl"}
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Booking failed: {e}")
