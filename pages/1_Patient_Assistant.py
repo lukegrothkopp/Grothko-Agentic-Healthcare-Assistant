@@ -259,65 +259,9 @@ if _ask_send and _ask_text and _ask_text.strip():
     st.session_state.current_patient_id = resolved_pid
 
 # -------------------------------
-# Tabs
+# Quick Schedule (single tab)
 # -------------------------------
-tab_general, tab_schedule = st.tabs(["General Assistant", "Quick Schedule"])
-
-# ===========
-# Tab: General
-# ===========
-with tab_general:
-    st.subheader("How can we help you today?")
-    prompt = st.text_input(
-        "Type your request",
-        placeholder=("e.g., My 70-year-old father has chronic kidney disease — please book a nephrologist "
-                     "at North Clinic and summarize current treatments"),
-        key="general_prompt",
-    )
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        run_btn = st.button("Submit", key="general_submit")
-    with c2:
-        clear_btn = st.button("Clear", key="general_clear")
-
-    if clear_btn:
-        st.session_state.pop("last_response_general", None)
-        st.session_state.pop("last_patient_general", None)
-        st.rerun()
-
-    if run_btn and prompt.strip():
-        pid = _resolve_pid_safe(mem, prompt, st.session_state.get("current_patient_id", "session"))
-        _safe_log(mem, pid, "user", prompt)
-
-        try:
-            state_in = {"messages": [HumanMessage(content=prompt)], "patient_id": pid}
-            state_out = graph.invoke(state_in)
-
-            # Prefer last AIMessage; fallback to 'result'
-            assistant_text = ""
-            for m in reversed(state_out.get("messages", [])):
-                if isinstance(m, AIMessage):
-                    assistant_text = m.content
-                    break
-            if not assistant_text:
-                assistant_text = state_out.get("result", "") or "(no result returned)"
-
-            _safe_log(mem, pid, "assistant", assistant_text)
-
-            st.session_state.last_response_general = assistant_text
-            st.session_state.last_patient_general = pid
-            st.session_state.current_patient_id = pid   # keep it in context for the rest of the app
-            st.success(f"Resolved patient: {pid}")
-            st.write(assistant_text)
-
-        except Exception as e:
-            st.error(f"Run failed: {e}")
-
-    if st.session_state.get("last_response_general"):
-        pid_echo = st.session_state.get("last_patient_general")
-        if pid_echo:
-            st.caption(f"(Last resolved patient: {pid_echo})")
-        st.write(st.session_state["last_response_general"])
+(tab_schedule,) = st.tabs(["Quick Schedule"])
 
 # ================
 # Tab: Quick Schedule
