@@ -19,6 +19,24 @@ export_secrets_to_env()  # ensures OPENAI_API_KEY etc. are in os.environ
 
 load_dotenv()
 
+# --- helpers & memory bootstrap (add this near the top, after imports) ---
+from utils.patient_memory import PatientMemory
+
+def _resolve_pid_safe(mem: PatientMemory, text: str, default_id: str) -> str:
+    """Resolve a patient id from free text; never throws; falls back to default."""
+    fn = getattr(mem, "resolve_from_text", None)
+    if callable(fn):
+        try:
+            val = fn(text, default=default_id)
+            return val or default_id or "session"
+        except Exception:
+            return default_id or "session"
+    return default_id or "session"
+
+# ensure the memory object exists
+if ("pmemory" not in st.session_state) or (not isinstance(st.session_state.get("pmemory"), PatientMemory)):
+    st.session_state.pmemory = PatientMemory()
+
 st.set_page_config(page_title="Patient Assistant", page_icon="🧍🏽", layout="wide")
 st.title("🧍🏽 Patient Assistant")
 st.caption("Ask for help with scheduling, records, and general info from trusted sources. (Won't provide medical advice)")
