@@ -14,11 +14,68 @@ from agents.graph_agent import build_graph
 from utils.patient_memory import PatientMemory
 from tools.booking_tool import get_booking_tool
 
+from utils.secret_env import export_secrets_to_env
+export_secrets_to_env()  # ensures OPENAI_API_KEY etc. are in os.environ
+
 load_dotenv()
 
 st.set_page_config(page_title="Patient Assistant", page_icon="🧍🏽", layout="wide")
 st.title("🧍🏽 Patient Assistant")
 st.caption("Ask for help with scheduling, records, and general info from trusted sources. (Won't provide medical advice)")
+
+# Render past chat (if you do that elsewhere, keep your version)
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+
+# Inline form so the input sits under the header (not bottom docked)
+with st.form("ask_form", clear_on_submit=True):
+    _ask_text = st.text_area(
+        "Type your question",
+        placeholder="e.g., I need help with severe headaches",
+        height=100,
+    )
+    _ask_send = st.form_submit_button("Send")
+
+if _ask_send and _ask_text and _ask_text.strip():
+    # Show user bubble
+    st.session_state.messages.append({"role": "user", "content": _ask_text})
+    with st.chat_message("user"):
+        st.markdown(_ask_text)
+
+    # Resolve patient id safely (uses selected patient if parsing fails)
+    resolved_pid = _resolve_pid_safe(st.session_state.pmemory, _ask_text, patient_id)
+
+    # Call your existing graph (assumes you already built `graph`)
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking…"):
+            try:
+                state = {
+                    "messages": [HumanMessage(content=_ask_text)],
+                    "intent": None,
+                    "result": None,
+                    "patient_id": resolved_pid,
+                }
+                result_state = graph.invoke(state)
+                answer = _extract_answer_from_state(result_state)
+            except Exception as e:
+                answer = f"Sorry—there was an error: {e}"
+            st.markdown(answer)
+
+    # Persist to memory so Clinician Console timeline sees it
+    try:
+        st.session_state.pmemory.record_event(
+            resolved_pid,
+            f"Patient asked: {_ask_text}\nAssistant: {answer}",
+            meta={"kind": "chat", "by": "patient"},
+        )
+    except Exception:
+        pass
+
+    # Save assistant message to session chat log
+    st.session_state.messages.append({"role": "assistant", "content": answer})
 
 # --- Singletons ---
 if "graph" not in st.session_state:
@@ -157,6 +214,41 @@ def _ensure_patient_from_form(
 
     mem_obj.save_patient_json(new_record)  # writes <OFFLINE_PATIENT_DIR>/<pid>.json and updates memory
     return new_pid
+
+def _extract_answer_from_state(state: dict) -> str:
+    """Robustly pull an assistant reply from the returned graph state."""
+    try:
+        msgs = state.get("messages", []) or []
+        for m in reversed(msgs):
+            if isinstance(m, AIMessage) or getattr(m, "type", "") == "ai" or (
+                isinstance(m, dict) and m.get("role") == "assistant"
+            ):
+                content = getattr(m, "content", None) if not isinstance(m, dict) else m.get("content")
+                if content and str(content).strip():
+                    return str(content)
+        if state.get("result"):
+            return str(state["result"])
+        if state.get("bullets"):
+            bl = [f"- {b}" for b in state["bullets"] if b]
+            if bl:
+                return "Here’s what I found:\n" + "\n".join(bl[:8])
+        if state.get("plan"):
+            steps = [s for s in state["plan"] if s]
+            if steps:
+                return "Here’s a plan I can follow:\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
+    except Exception:
+        pass
+    return "I’m here to help. I can summarize options, suggest next steps, or help book an appointment."
+
+def _resolve_pid_safe(mem, text: str, default_id: str) -> str:
+    fn = getattr(mem, "resolve_from_text", None)
+    if callable(fn):
+        try:
+            val = fn(text, default=default_id)
+            return val or default_id or "session"
+        except Exception:
+            return default_id or "session"
+    return default_id or "session"
 
 # --- Tabs ---
 tab_general, tab_schedule = st.tabs(["General Assistant", "Quick Schedule"])
