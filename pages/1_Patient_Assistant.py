@@ -24,11 +24,7 @@ st.set_page_config(page_title="Patient Assistant", layout="wide")
 st.title("🩺 Patient Assistant")
 st.caption("Demo — not medical advice. Provides high-level info and admin logistics only.")
 
-# ----- memory (recreate if old instance lacks new methods) -----
-if ("pmemory" not in st.session_state) or (not hasattr(st.session_state.get("pmemory"), "resolve_from_text")):
-    st.session_state.pmemory = PatientMemory()
-mem: PatientMemory = st.session_state.pmemory
-
+# ----- utilities -----
 def resolve_pid_safe(mem: PatientMemory, text: str, default_id: str) -> str:
     """
     Resolve a patient id from free text; never raises.
@@ -43,12 +39,23 @@ def resolve_pid_safe(mem: PatientMemory, text: str, default_id: str) -> str:
             return default_id or "session"
     return default_id or "session"
 
+def force_refresh_pmemory():
+    """Drop any stale cached instance so the new class (with resolve_from_text) is used."""
+    if "pmemory" in st.session_state:
+        del st.session_state["pmemory"]
+    st.session_state.pmemory = PatientMemory()
+
+# ----- memory (recreate if old instance lacks new methods) -----
+if ("pmemory" not in st.session_state) or (not hasattr(st.session_state.get("pmemory"), "resolve_from_text")):
+    force_refresh_pmemory()
+mem: PatientMemory = st.session_state.pmemory
+
 # ----- graph (cache once in session) -----
 if "graph" not in st.session_state:
     st.session_state.graph = build_graph(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 graph = st.session_state.graph
 
-# ----- sidebar: pick patient + booking toggle -----
+# ----- sidebar: pick patient + booking toggle + reset -----
 with st.sidebar:
     st.header("Your Info")
     directory = mem.list_patients()
@@ -62,6 +69,16 @@ with st.sidebar:
     st.caption("Tip: You can use natural phrases like “book a cardiologist next Monday”.")
     st.markdown("---")
     show_booking = st.toggle("Show booking panel", value=True, help="Toggle the appointment panel below.")
+    # small diagnostics + reset to avoid cached stale objects
+    st.markdown("**Diagnostics**")
+    st.write({
+        "pmem_has_resolve": hasattr(mem, "resolve_from_text"),
+        "selected_patient": patient_id,
+    })
+    if st.button("Reset session state"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 
 # ========================
 # Chat UI (inline input just under header)
@@ -91,7 +108,7 @@ if submitted and user_prompt and user_prompt.strip():
     with st.chat_message("user"):
         st.markdown(user_prompt)
 
-    # resolve patient id from text; default to sidebar selection
+    # resolve patient id from text; default to sidebar selection (safe helper)
     resolved_pid = resolve_pid_safe(mem, user_prompt, patient_id)
 
     # call the graph
@@ -105,7 +122,7 @@ if submitted and user_prompt and user_prompt.strip():
                     "patient_id": resolved_pid,
                 }
                 result_state = graph.invoke(state)
-                answer = result_state["messages"][-1].content
+                answer = result_state["messages"][-1].content or "no result"
             except Exception as e:
                 answer = f"Sorry—there was an error: {e}"
             st.markdown(answer)
