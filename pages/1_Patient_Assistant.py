@@ -312,7 +312,7 @@ with tab_schedule:
                 format="YYYY-MM-DD",
             )
     with c2:
-        age_input = st.number_input("Age)", min_value=0, max_value=120, value=0, step=1, key="sched_age")
+        age_input = st.number_input("Age", min_value=0, max_value=120, value=0, step=1, key="sched_age")
         age_val = int(age_input) if age_input else None
     with c3:
         sex = st.selectbox("Sex", options=["", "male", "female", "other"], index=0, key="sched_sex")
