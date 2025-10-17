@@ -36,7 +36,7 @@ if "graph" not in st.session_state:
     st.session_state.graph = build_graph(model_name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 graph = st.session_state.graph
 
-# ----- sidebar: pick patient + (restored) booking widget toggle -----
+# ----- sidebar: pick patient + booking toggle -----
 with st.sidebar:
     st.header("Your Info")
     directory = mem.list_patients()
@@ -52,7 +52,7 @@ with st.sidebar:
     show_booking = st.toggle("Show booking panel", value=True, help="Toggle the appointment panel below.")
 
 # ========================
-# Chat UI
+# Chat UI (inline input just under header)
 # ========================
 st.subheader("Ask for help")
 
@@ -64,22 +64,30 @@ for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
 
-# chat input
-if prompt := st.chat_input("How can I help you today?"):
+# INLINE input (form) instead of bottom-docked st.chat_input
+with st.form("ask_form", clear_on_submit=True):
+    user_prompt = st.text_area(
+        "Type your question",
+        placeholder="e.g., I need help with high blood pressure",
+        height=100,
+    )
+    submitted = st.form_submit_button("Send")
+
+if submitted and user_prompt and user_prompt.strip():
     # user bubble
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.messages.append({"role": "user", "content": user_prompt})
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(user_prompt)
 
     # resolve patient id from text; default to selection
-    resolved_pid = mem.resolve_from_text(prompt, default=patient_id) or patient_id or "session"
+    resolved_pid = mem.resolve_from_text(user_prompt, default=patient_id) or patient_id or "session"
 
     # call the graph
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
             try:
                 state = {
-                    "messages": [HumanMessage(content=prompt)],
+                    "messages": [HumanMessage(content=user_prompt)],
                     "intent": None,
                     "result": None,
                     "patient_id": resolved_pid,
@@ -88,14 +96,13 @@ if prompt := st.chat_input("How can I help you today?"):
                 answer = result_state["messages"][-1].content
             except Exception as e:
                 answer = f"Sorry—there was an error: {e}"
-
             st.markdown(answer)
 
     # log conversation into memory so clinician timeline sees it
     try:
         mem.record_event(
             resolved_pid,
-            f"Patient asked: {prompt}\nAssistant: {answer}",
+            f"Patient asked: {user_prompt}\nAssistant: {answer}",
             meta={"kind": "chat", "by": "patient"},
         )
     except Exception:
@@ -105,7 +112,7 @@ if prompt := st.chat_input("How can I help you today?"):
     st.session_state.messages.append({"role": "assistant", "content": answer})
 
 # ========================
-# (Restored) Booking Panel
+# Booking Panel (below chat)
 # ========================
 if show_booking:
     st.markdown("---")
@@ -130,7 +137,6 @@ if show_booking:
                     "doctor_name": doctor.strip(),
                     "appointment_date": str(date_sel),  # YYYY-MM-DD
                 }
-                # booking tool understands JSON payload
                 result_msg = book_appointment(json.dumps(payload))
                 st.success(result_msg)
 
@@ -164,11 +170,9 @@ if show_booking:
         )
         if st.button("Book via Natural Language", use_container_width=True, key="book_nl_btn"):
             try:
-                # booking tool also accepts free text (“today”, “tomorrow”, “next Monday”)
                 result_msg = book_appointment(nl_text)
                 st.success(result_msg)
 
-                # log to selected patient for immediate visibility
                 mem.record_event(
                     patient_id,
                     f"Booked appointment (NL): {nl_text}",
