@@ -21,4 +21,4 @@ st.markdown("""
 - **Developer Console** – seed DB, build FAISS index, run QA evals, debug.
 """)
 
-st.info("This landing page is public. The Clinician/Developer pages are gated by an access code.")
+st.info("NOTE: This landing page & the patient assistant are public. The Clinician/Developer pages are gated by an access code.")
