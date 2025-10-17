@@ -1,120 +1,147 @@
 # pages/2_Clinician_Console.py
+from __future__ import annotations
+
 import os
-from datetime import datetime
+import json
+from pathlib import Path
+
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
 from utils.patient_memory import PatientMemory
+from utils.database_ops import get_patient_record, update_patient_record
 
+# ---------- boot ----------
 load_dotenv()
+for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
+    if k in st.secrets and st.secrets[k]:
+        os.environ[k] = str(st.secrets[k]).strip()
 
-st.set_page_config(page_title="Clinician Console", page_icon="👩🏼‍⚕️", layout="wide")
-st.title("👩🏼‍⚕️ Clinician Console")
-st.caption("Operational view of patient context, recent events, and quick actions.")
+st.set_page_config(page_title="Clinician Console", page_icon="🩺", layout="wide")
+st.title("🩺 Clinician Console")
+st.caption("Demo — not medical advice. View patient context, recent activity, and plans.")
 
-# ---- Access gate (Clinician) ----
-def _get_token(name: str) -> str:
-    try:
-        v = st.secrets.get(name)
-        if v:
-            return str(v).strip()
-    except Exception:
-        pass
-    return str(os.getenv(name, "")).strip()
-
-CLINICIAN_REQUIRED = _get_token("CLINICIAN_TOKEN")
-if CLINICIAN_REQUIRED:
-    with st.sidebar:
-        clinician_code = st.text_input("Clinician access code", type="password")
-    if (clinician_code or "").strip() != CLINICIAN_REQUIRED:
-        st.warning("Enter a valid clinician access code to view this console.")
-        st.stop()
-# ---- end access gate ----
-
-# --- Singleton memory ---
+# ---------- session singletons ----------
 if "pmemory" not in st.session_state:
     st.session_state.pmemory = PatientMemory()
 _mem: PatientMemory = st.session_state.pmemory
 
-# --- Patient picker (blank by default) ---
-patients = _mem.list_patients()
-pretty = [f'{p["patient_id"]} — {p.get("name","") or "(no name)"}' for p in patients]
+# ---------- helpers ----------
+def _latest_plan_for_patient(pid: str):
+    """Return (query, steps) for the most recent plan in data/traces.jsonl for this patient."""
+    traces_path = Path("data/traces.jsonl")
+    if not traces_path.exists():
+        return None, None
+    try:
+        lines = traces_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None, None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if row.get("type") == "plan" and row.get("patient_id") == pid:
+            return row.get("query"), row.get("steps") or []
+    return None, None
 
-placeholder = "— Select a patient —"
-options = [placeholder] + pretty if pretty else ["— No patients loaded —"]
-sel = st.selectbox("Patient", options=options, index=0, disabled=(not pretty))
+def _get_patient_dir_row(pid: str) -> dict | None:
+    """Combine seed directory info with DB record for a richer summary."""
+    sd = _mem.patients.get(pid).data if pid in _mem.patients else {}
+    db = get_patient_record(pid) or {}
+    merged = dict(sd)
+    # merge DB on top (DB wins)
+    for k, v in (db or {}).items():
+        merged[k] = v
+    merged["patient_id"] = pid
+    return merged or None
 
-pid = None
-if pretty and sel != placeholder:
-    pid = patients[pretty.index(sel)].get("patient_id")
+# ---------- sidebar patient picker ----------
+with st.sidebar:
+    st.header("Patient")
+    directory = _mem.list_patients()
+    if not directory:
+        st.warning("No patients loaded. Use the Developer Console to import seeds.")
+        st.stop()
 
-if not pid:
-    st.info("Select a patient to view details.")
-    st.stop()
+    label_map = {f"{r['name']} ({r['patient_id']})": r["patient_id"] for r in directory}
+    sel_label = st.selectbox("Select patient", list(label_map.keys()))
+    pid = label_map[sel_label]
 
-# --- Summary header ---
-data = _mem.get(pid) or {}
-profile = data.get("profile") or {}
-name = profile.get("full_name") or pid
-st.subheader(name)
-st.caption(f"Patient ID: {pid}")
-if data.get("summary"):
-    st.write(data["summary"])
+# ---------- top section: patient overview ----------
+info = _get_patient_dir_row(pid)
+if info:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.subheader(info.get("name", pid))
+        st.write(f"**Patient ID:** {pid}")
+        if info.get("age") is not None:
+            st.write(f"**Age:** {info['age']}")
+        if info.get("conditions"):
+            st.write("**Conditions:**", ", ".join(map(str, info.get("conditions", []))) )
+    with col2:
+        st.subheader("Summary")
+        st.write(_mem.get_summary(pid) or "—")
+    with col3:
+        st.subheader("Appointments")
+        appts = info.get("appointments") or []
+        if appts:
+            df = pd.DataFrame([{k: a.get(k) for k in a.keys()} for a in appts])
+            st.dataframe(df, use_container_width=True, height=180)
+        else:
+            st.write("—")
+else:
+    st.info("No summary available for this patient.")
 
-# --- Columns: Problems / Meds / Latest Labs ---
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.markdown("**Key Problems**")
-    probs = data.get("problems") or []
-    if not probs:
-        st.write("—")
-    else:
-        for p in probs[:6]:
-            st.write(f"- {p.get('name','')}")
-with c2:
-    st.markdown("**Medications**")
-    meds = data.get("medications") or []
-    if not meds:
-        st.write("—")
-    else:
-        for m in meds[:8]:
-            st.write(f"- {m.get('name','')}: {m.get('dose','')} {m.get('frequency','')}".strip())
-with c3:
-    st.markdown("**Latest Labs**")
-    labs = data.get("labs") or []
-    if not labs:
-        st.write("—")
-    else:
-        last = labs[-1]
-        vals = last.get("values") or {}
-        lines = []
-        for k in ("creatinine_mg_dL","egfr_mL_min_1.73m2","a1c_percent","hemoglobin_g_dL","potassium_mmol_L","co2_bicarb_mmol_L","urine_acr_mg_g"):
-            if k in vals:
-                lines.append(f"- {k}: {vals[k]}")
-        st.write("\n".join(lines) if lines else "—")
-
+# ---------- recent activity ----------
 st.markdown("---")
-
-# --- Recent window (last k entries/messages) ---
-st.markdown("### Recent activity")
+st.subheader("Recent Activity")
 try:
     window = _mem.get_window(pid, k=8)
-except AttributeError:
-    st.error("PatientMemory.get_window is missing. Please update utils/patient_memory.py from the latest code.")
-    st.stop()
+except Exception as e:
+    st.error(f"Could not load recent activity: {e}")
+    window = []
 
-if not window:
-    st.write("No recent entries.")
+if window:
+    for row in window:
+        ts = row.get("ts", "—")
+        typ = row.get("type") or row.get("tag") or "event"
+        txt = row.get("text") or row.get("notes") or row.get("diagnosis") or json.dumps(row)[:200]
+        st.write(f"- [{typ} @ {ts}] {txt}")
 else:
-    for role, content, ts in window:
-        # Simple role bubble
-        with st.chat_message("user" if role.lower() == "user" else "assistant"):
-            st.markdown(content)
-        st.caption(ts or "")
+    st.write("No recent activity.")
 
-# --- Footer ---
-with st.expander("Technical details"):
-    st.write({
-        "OFFLINE_PATIENT_DIR": os.getenv("OFFLINE_PATIENT_DIR", "data/patient_memory"),
-        "Loaded patients": len(_mem.patients),
-    })
+# ---------- latest plan widget ----------
+st.markdown("---")
+st.subheader("Latest agent plan for this patient")
+q, steps = _latest_plan_for_patient(pid)
+if q or steps:
+    if q:
+        st.write("**User request that was planned:**", q)
+    if steps:
+        st.markdown("**Plan steps:**")
+        for i, s in enumerate(steps, 1):
+            st.write(f"{i}. {s}")
+else:
+    st.info("No plan logged for this patient yet. Trigger a request on the Patient page to generate one.")
+
+# ---------- clinician note add ----------
+st.markdown("---")
+st.subheader("Add a clinician note")
+note = st.text_area("Note", placeholder="e.g., Follow-up needed on BP logs; check labs next visit.")
+if st.button("Save note"):
+    try:
+        # Save to DB
+        ok = update_patient_record(pid, {"latest_note": note})
+        # Record into memory log so it shows up under Recent Activity
+        _mem.record_event(pid, text=f"[Clinician note] {note}", meta={"source": "clinician_console"})
+        if ok:
+            st.success("Note saved.")
+        else:
+            st.info("Record updated locally (DB may be read-only in this environment).")
+    except Exception as e:
+        st.error(f"Failed to save note: {e}")
