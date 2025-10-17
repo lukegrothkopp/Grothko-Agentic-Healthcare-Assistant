@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 
 DEFAULT_SEED_DIR = "data/patient_seeds"
+DEFAULT_DB_PATH = Path("data/patient_db.json")
+DEFAULT_DB_GLOB = "data/patient_db/*.json"
+
 MEMORY_LOG_DIR = Path("data/memory")
 MEMORY_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -47,6 +50,7 @@ class PatientMemory:
     """
     Lightweight, file-backed patient memory:
     - Loads 'seed' patient JSON files from OFFLINE_PATIENT_DIR (or default).
+    - If seeds are empty/missing, FALLS BACK to data/patient_db.json and data/patient_db/*.json.
     - Persists per-patient events into data/memory/<patient_id>.jsonl
     - Provides summary, retrieval, and recent-window helpers.
     """
@@ -71,25 +75,14 @@ class PatientMemory:
         self.history.clear()
         self.sessions.clear()
 
-        # Load seed patients (files can be a list of records or a single dict)
-        for fp in sorted(glob.glob(os.path.join(seed_dir, "*.json"))):
-            try:
-                data = json.loads(Path(fp).read_text(encoding="utf-8"))
-            except Exception:
-                continue
+        # 1) Try seeds in the configured folder
+        self._load_seed_folder(seed_dir)
 
-            if isinstance(data, list):
-                for rec in data:
-                    self._ingest_patient_record(rec)
-            elif isinstance(data, dict):
-                # container or single record
-                if "patients" in data and isinstance(data["patients"], list):
-                    for rec in data["patients"]:
-                        self._ingest_patient_record(rec)
-                else:
-                    self._ingest_patient_record(data)
+        # 2) If still empty, FALLBACK to patient_db.json and data/patient_db/*.json
+        if not self.patients:
+            self._load_from_patient_db_fallback()
 
-        # Load per-patient memory logs
+        # 3) Load per-patient memory logs
         for fp in sorted(glob.glob(str(MEMORY_LOG_DIR / "*.jsonl"))):
             pid = Path(fp).stem
             rows: List[Dict[str, Any]] = []
@@ -108,8 +101,65 @@ class PatientMemory:
             if rows:
                 self.history.setdefault(pid, []).extend(rows)
 
+    def _load_seed_folder(self, folder: str) -> None:
+        """Load patients from a seed folder (expects *.json files)."""
+        for fp in sorted(glob.glob(os.path.join(folder, "*.json"))):
+            try:
+                data = json.loads(Path(fp).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            if isinstance(data, list):
+                for rec in data:
+                    self._ingest_patient_record(rec)
+            elif isinstance(data, dict):
+                # container or single record
+                if "patients" in data and isinstance(data["patients"], list):
+                    for rec in data["patients"]:
+                        self._ingest_patient_record(rec)
+                else:
+                    self._ingest_patient_record(data)
+
+    def _load_from_patient_db_fallback(self) -> None:
+        """Fallback loader from the legacy DB files if seed folder is empty."""
+        # A) data/patient_db.json (dict keyed by patient_id)
+        if DEFAULT_DB_PATH.exists():
+            try:
+                data = json.loads(DEFAULT_DB_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._ingest_patient_db_dict(data)
+            except Exception:
+                pass
+
+        # B) any loose JSONs under data/patient_db/*.json
+        for fp in sorted(glob.glob(DEFAULT_DB_GLOB)):
+            try:
+                data = json.loads(Path(fp).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            # If it's a dict of patients keyed by id
+            if isinstance(data, dict) and "patient_001" in data or any(k.startswith("patient_") for k in data.keys()):
+                self._ingest_patient_db_dict(data)
+            # Or a single record / list of records
+            elif isinstance(data, dict):
+                self._ingest_patient_record(data)
+            elif isinstance(data, list):
+                for rec in data:
+                    self._ingest_patient_record(rec)
+
+    def _ingest_patient_db_dict(self, db: Dict[str, Any]) -> None:
+        """db is a dict keyed by patient_id → record dict."""
+        for pid, rec in db.items():
+            if not isinstance(rec, dict):
+                continue
+            rec = dict(rec)
+            rec.setdefault("patient_id", pid)
+            self._ingest_patient_record(rec)
+
     def _ingest_patient_record(self, rec: Dict[str, Any]) -> None:
         """Normalize and store a patient record."""
+        if not isinstance(rec, dict):
+            return
         pid = rec.get("patient_id") or rec.get("id") or rec.get("pid")
         if not pid:
             # generate a simple deterministic ID from name if present
@@ -126,8 +176,13 @@ class PatientMemory:
             return x
 
         hist = rec.get("history") or []
+        if isinstance(hist, dict):
+            hist = [hist]
         hist = [_ensure_ts(h) for h in hist if isinstance(h, dict)]
+
         appts = rec.get("appointments") or []
+        if isinstance(appts, dict):
+            appts = [appts]
         appts = [_ensure_ts({"type": "appointment", **a}) for a in appts if isinstance(a, dict)]
 
         if hist or appts:
@@ -210,8 +265,8 @@ class PatientMemory:
 
         # fall back to seed patient top-level fields (like conditions)
         p = self.patients.get(patient_id)
+        base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
         if p and not hits:
-            base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
             conds = base.get("conditions") or []
             for c in conds:
                 t = str(c)
@@ -222,7 +277,7 @@ class PatientMemory:
         return [h[1] for h in hits[:k]]
 
     def get_summary(self, patient_id: str) -> str:
-        """Compact one-paragraph summary from seed record + last activity."""
+        """Compact one-paragraph summary from seed/DB record + last activity."""
         p = self.patients.get(patient_id)
         base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
         if not base:
