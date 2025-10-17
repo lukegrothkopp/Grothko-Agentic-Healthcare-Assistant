@@ -1,6 +1,9 @@
 # agents/graph_agent.py
 from __future__ import annotations
 
+from utils.web_search import search_trusted
+from utils.summarize import llm_bullets_with_citations, have_openai
+
 from typing import List, Optional, TypedDict, Any, Tuple
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -210,9 +213,18 @@ def plan_node(state: AgentState) -> AgentState:
     return state
 
 def info_node(state: AgentState) -> AgentState:
+    """
+    Retrieve KB snippets; then (if needed) augment with trusted web sources and produce
+    a single patient-facing message that:
+    - tells them to book below,
+    - shows high-level bullets with source labels,
+    - adds a short safety line if urgent.
+    """
     user_q = _last_user_text(state)
     urgent = bool(state.get("urgent"))
-    bullets: List[str] = []
+
+    # 1) Offline KB first (fast)
+    kb_bullets: List[str] = []
     try:
         rag = RAGPipeline()
         pairs = rag.retrieve(user_q, k=4) or []  # List[(text, score)]
@@ -221,19 +233,44 @@ def info_node(state: AgentState) -> AgentState:
                 continue
             snippet = txt.strip().replace("\n", " ").strip()
             if snippet:
-                bullets.append(snippet[:320])
+                kb_bullets.append(snippet[:320])
     except Exception:
         pass
 
-    state["bullets"] = bullets
+    # 2) If we have <3 bullets, try trusted web (Tavily/SerpAPI) + LLM summary
+    web_text = ""
+    if len(kb_bullets) < 3:
+        try:
+            docs = search_trusted(user_q, k=5)
+            if docs:
+                web_text, web_bullets = llm_bullets_with_citations(user_q, docs)
+                # If we failed to call OpenAI, web_text will still contain simple bullets+Sources
+            # else: keep kb_bullets only
+        except Exception:
+            pass
 
-    # If urgent, prioritize admin/triage text; if not, only fallback to non-urgent template
+    # 3) Compose unified patient-first reply
+    header = "You can book an appointment below in **Quick Schedule**."
     if urgent:
-        state["result"] = _urgent_admin_reply(user_q)
-    elif bullets:
-        state["result"] = "\n".join(f"- {b}" for b in bullets[:5])
+        header += "\nIf you feel severely unwell or unsafe, **call emergency services or go to the nearest ER.**"
+
+    body = ""
+    if web_text:
+        body = "\n\n**Trusted info (high-level):**\n" + web_text.strip()
     else:
-        state["result"] = _nonurgent_admin_reply(user_q)
+        # fall back to KB bullets (if any) or topic fallbacks (from previous code)
+        if kb_bullets:
+            body = "\n\n**Trusted info (high-level):**\n" + "\n".join([f"• {b}" for b in kb_bullets[:5]])
+        else:
+            # keep the previous topic fallback behavior (ensure you still have `_topic_fallback_bullets`)
+            fb = _topic_fallback_bullets(user_q)
+            if fb:
+                body = "\n\n**Trusted info (high-level):**\n" + "\n".join([f"• {b}" for b in fb])
+            else:
+                body = "\n\nI can also pull high-level info from trusted sources; try a more specific question."
+
+    state["bullets"] = kb_bullets  # keep for any downstream widgets
+    state["result"] = (header + body).strip()
     return state
 
 def contact_node(state: AgentState) -> AgentState:
