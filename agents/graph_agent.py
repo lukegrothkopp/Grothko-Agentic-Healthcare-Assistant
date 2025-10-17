@@ -1,26 +1,67 @@
 # agents/graph_agent.py
 from __future__ import annotations
 
-from typing import List, Optional, TypedDict, Any
+from typing import List, Optional, TypedDict, Any, Tuple
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
+import re
 
 from utils.rag_pipeline import RAGPipeline
+try:
+    import streamlit as st  # optional for session PatientMemory reuse
+except Exception:  # pragma: no cover
+    st = None
+from utils.patient_memory import PatientMemory
 
-# --------------------------
-# State
-# --------------------------
+
 class AgentState(TypedDict, total=False):
-    messages: List[Any]             # LangChain messages or dicts with "content"
+    messages: List[Any]
     intent: Optional[str]
     result: Optional[str]
     patient_id: Optional[str]
-    plan: Optional[List[str]]       # optional, plan steps
-    bullets: Optional[List[str]]    # optional, info bullets
+    plan: Optional[List[str]]
+    bullets: Optional[List[str]]
+    urgent: Optional[bool]            # <- new: internal flag (not shown to user)
 
-# --------------------------
-# Helpers
-# --------------------------
+
+# --------- Patient memory context ---------
+def _safe_pm() -> PatientMemory:
+    if st is not None:
+        try:
+            pm = st.session_state.get("pmemory")
+            if isinstance(pm, PatientMemory):
+                return pm
+        except Exception:
+            pass
+    return PatientMemory()
+
+def memory_context_provider(patient_id: Optional[str], user_query: str) -> Tuple[str, List[str]]:
+    pid = (patient_id or "").strip() or "unknown"
+    pm = _safe_pm()
+
+    try:
+        summary = (pm.get_summary(pid) or "").strip()
+    except Exception:
+        summary = ""
+
+    recalls: List[str] = []
+    try:
+        hits = pm.search(pid, user_query or "", k=3) or []
+        if not hits:
+            win = pm.get_window(pid, k=3)
+            for r in win:
+                txt = r.get("text") or r.get("notes") or r.get("diagnosis")
+                if txt:
+                    recalls.append(str(txt)[:200])
+        else:
+            recalls.extend([str(h)[:200] for h in hits])
+    except Exception:
+        pass
+
+    return summary[:600], [r[:200] for r in recalls[:3]]
+
+
+# --------- Small helpers ---------
 def _msg_text(m: Any) -> str:
     if hasattr(m, "content"):
         return getattr(m, "content") or ""
@@ -28,65 +69,97 @@ def _msg_text(m: Any) -> str:
         return str(m.get("content", "") or "")
     return str(m or "")
 
+def _last_user_text(state: AgentState) -> str:
+    for m in reversed(state.get("messages") or []):
+        if isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("role") == "user"):
+            return _msg_text(m)
+    return ""
+
 def _ensure_final_ai(state: AgentState, text: str) -> AgentState:
     msgs = list(state.get("messages") or [])
     msgs.append(AIMessage(content=text))
     state["messages"] = msgs
     return state
 
-def _compose_fallback(state: AgentState) -> str:
-    if state.get("result"):
-        return str(state["result"])
 
-    if state.get("bullets"):
-        bl = [f"- {b}" for b in state["bullets"] if b]
-        if bl:
-            return "Here’s what I found:\n" + "\n".join(bl[:8])
+# --------- Urgency detection + admin reply ---------
+_URGENT_PHRASES = [
+    r"\bchest pain\b",
+    r"\btrouble breathing\b|\bshort(ness)? of breath\b",
+    r"\bsevere headache\b|\bworst headache\b",
+    r"\bconfusion\b|\bfaint(ing)?\b",
+    r"\bweakness on one side\b|\bslurred speech\b",
+    r"\bstiff neck\b",
+    r"\bseizure\b",
+    r"\buncontrolled bleeding\b",
+]
 
-    if state.get("plan"):
-        steps = [s for s in state["plan"] if s]
-        if steps:
-            return "Here’s a plan I can follow:\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
+def _is_very_high_fever(text: str) -> bool:
+    # match temperatures like 103, 103.5, 104F, 40C etc. (rough, admin-level)
+    for n in re.findall(r"(\d{2,3}(?:\.\d)?)", text):
+        try:
+            v = float(n)
+            if v >= 103:  # Fahrenheit — admin-level “very high”
+                return True
+        except Exception:
+            continue
+    # also catch phrases
+    if re.search(r"\b(103|104|105)\b", text):
+        return True
+    return False
 
-    # mirror last user message if available
-    user_text = ""
-    for m in reversed(state.get("messages") or []):
-        # HumanMessage or dict role=user
-        if isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("role") == "user"):
-            user_text = _msg_text(m)
-            break
-    base = "I’m here to help."
-    if user_text:
-        return f"{base} You said: “{user_text}”. I can summarize options, suggest next steps, or help book an appointment."
-    return f"{base} I can summarize options, suggest next steps, or help book an appointment."
+def _urgent_admin_reply(user_text: str) -> str:
+    # High-level, non-clinical guidance + logistics; safe for admin assistant.
+    lines = [
+        "That sounds important. I’m a logistics assistant (not a clinician), but here’s how I can help right now:",
+        "• If you feel severely unwell or unsafe, **call emergency services or go to the nearest ER.**",
+        "• I can book the **earliest available appointment** or help message your clinic.",
+        "• I can also pull trusted, high-level information while you get care arranged.",
+        "",
+        "Tell me if you want me to **book urgent care** or **contact your clinician**. If you can, include a preferred time or location.",
+    ]
+    # Add a tiny echo for empathy without re-stating medical advice
+    ut = user_text.strip()
+    if ut:
+        lines.insert(0, f"You said: “{ut}”.")
+    return "\n".join(lines)
 
-# --------------------------
-# Nodes
-# --------------------------
+
+# --------- Nodes ---------
 def start_node(state: AgentState) -> AgentState:
-    # Optionally inject a tiny system primer; keep it short to avoid token bloat.
     pid = state.get("patient_id") or "unknown"
-    primer = SystemMessage(
-        content=f"You are assisting patient_id={pid}. Provide high-level guidance only (no medical advice)."
+    user_q = _last_user_text(state)
+    try:
+        summary, recalls = memory_context_provider(pid, user_q)
+    except Exception:
+        summary, recalls = "", []
+
+    sys_txt = (
+        f"You are assisting patient_id={pid}. "
+        f"Provide high-level, non-diagnostic guidance. Be concise and practical."
     )
+    if summary:
+        sys_txt += f"\nPatient summary: {summary}"
+    if recalls:
+        sys_txt += "\nRecent memory snippets:\n" + "\n".join(f"- {r}" for r in recalls)
+
     msgs = list(state.get("messages") or [])
-    # Only insert once
     if not msgs or not isinstance(msgs[0], SystemMessage):
-        msgs.insert(0, primer)
+        msgs.insert(0, SystemMessage(content=sys_txt))
     state["messages"] = msgs
     return state
 
 def classify_node(state: AgentState) -> AgentState:
-    text = ""
-    for m in reversed(state.get("messages") or []):
-        if isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("role") == "user"):
-            text = _msg_text(m).lower()
-            break
+    text = _last_user_text(state).lower()
     intent = "info"
     if any(w in text for w in ("book", "appointment", "schedule")):
         intent = "book"
     elif any(w in text for w in ("history", "records", "what happened")):
         intent = "history"
+
+    # urgent flag (does not change routing; affects response content)
+    urgent = _is_very_high_fever(text) or any(re.search(p, text) for p in _URGENT_PHRASES)
+    state["urgent"] = bool(urgent)
     state["intent"] = intent
     return state
 
@@ -101,7 +174,7 @@ def plan_node(state: AgentState) -> AgentState:
         ]
     elif intent == "book":
         plan = [
-            "Parse patient id, doctor/specialty, and date (supports words like ‘tomorrow’, ‘next Monday’)",
+            "Parse patient id, doctor/specialty, and date (supports ‘today’, ‘tomorrow’, ‘next Monday’)",
             "Create an appointment record if parsed successfully",
             "Confirm to the patient and log to their memory",
         ]
@@ -111,49 +184,68 @@ def plan_node(state: AgentState) -> AgentState:
     return state
 
 def info_node(state: AgentState) -> AgentState:
+    """
+    Pulls concise snippets from the offline KB. If urgent flag is set OR
+    no usable bullets were found, produce a patient-facing admin reply instead
+    of exposing internal plan steps.
+    """
+    user_q = _last_user_text(state)
+    urgent = bool(state.get("urgent"))
+
+    bullets: List[str] = []
     try:
         rag = RAGPipeline()
-        query = ""
-        for m in reversed(state.get("messages") or []):
-            if isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("role") == "user"):
-                query = _msg_text(m)
-                break
-        pairs = rag.retrieve(query, k=4) or []  # List[Tuple[text, score]] or similar
-        bullets: List[str] = []
+        pairs = rag.retrieve(user_q, k=4) or []  # e.g., List[(text, score)]
         for txt, _score in pairs:
             if not txt:
                 continue
             snippet = txt.strip().replace("\n", " ").strip()
             if snippet:
                 bullets.append(snippet[:320])
-        state["bullets"] = bullets
-        if bullets:
-            state["result"] = "\n".join(f"- {b}" for b in bullets[:5])
     except Exception:
         pass
+
+    state["bullets"] = bullets
+
+    # If urgent or no snippets, produce admin-safe, helpful text
+    if urgent or not bullets:
+        state["result"] = _urgent_admin_reply(user_q)
+    else:
+        state["result"] = "\n".join(f"- {b}" for b in bullets[:5])
     return state
 
 def book_node(state: AgentState) -> AgentState:
-    # Booking is usually handled by your Streamlit UI + booking tool.
-    # If you implement booking here, set state["result"] with the confirmation text.
+    # Booking remains UI/tool-driven; keep node for symmetry/future use.
+    # If you later move booking here, set state["result"] accordingly.
+    if state.get("urgent"):
+        # Even in a booking flow, if flagged urgent, remind of admin steps
+        user_q = _last_user_text(state)
+        state["result"] = _urgent_admin_reply(user_q)
     return state
 
 def finalize_node(state: AgentState) -> AgentState:
-    # If the last message is already assistant text, keep it; otherwise synthesize a safe reply.
-    msgs = state.get("messages") or []
-    if msgs:
-        last = msgs[-1]
-        if isinstance(last, AIMessage) or (isinstance(last, dict) and last.get("role") == "assistant"):
-            content = _msg_text(last)
-            if content and content.strip():
-                return state
-    reply = _compose_fallback(state)
-    return _ensure_final_ai(state, reply)
+    """
+    Always append a final assistant reply. Do NOT show internal plan steps.
+    """
+    # If tool or info provided a result, prefer that
+    if state.get("result"):
+        return _ensure_final_ai(state, str(state["result"]))
 
-# --------------------------
-# Graph
-# --------------------------
+    # Second choice: trusted bullets
+    bl = [f"- {b}" for b in (state.get("bullets") or []) if b]
+    if bl:
+        return _ensure_final_ai(state, "Here’s what I found:\n" + "\n".join(bl[:8]))
+
+    # Last resort: helpful admin reply (not the raw plan)
+    user_q = _last_user_text(state)
+    return _ensure_final_ai(state, _urgent_admin_reply(user_q))
+
+
+# --------- Graph wiring ---------
 def build_graph(model_name: str = "gpt-4o-mini"):
+    """
+    start → classify → plan → (info | book) → finalize
+    """
     graph = StateGraph(AgentState)
 
     graph.add_node("start", start_node)
