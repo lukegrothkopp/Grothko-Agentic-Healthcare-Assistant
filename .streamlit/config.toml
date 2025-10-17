@@ -1,0 +1,8 @@
+# .streamlit/config.toml
+[theme]
+base = "dark"
+primaryColor = "#10b981"              # teal accent (optional)
+backgroundColor = "#0b1320"           # app background (optional)
+secondaryBackgroundColor = "#111827"  # sidebar/cards (optional)
+textColor = "#e5e7eb"                 # light gray text (optional)
+font = "sans serif"
