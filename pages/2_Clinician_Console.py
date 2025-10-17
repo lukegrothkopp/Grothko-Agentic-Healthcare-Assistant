@@ -7,6 +7,9 @@ from typing import Any, Dict, List, Optional
 from datetime import date
 from pathlib import Path
 
+from tools.booking_tool import book_appointment
+import json  # if not already imported
+
 import pandas as pd
 import streamlit as st
 
