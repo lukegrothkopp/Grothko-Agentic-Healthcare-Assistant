@@ -9,6 +9,7 @@ langchain-openai>=0.2.2
 networkx>=3.2.1
 numpy>=1.26.4
 openai>=1.43.0
+pandas
 python-dotenv>=1.0
 pydantic>=2.8.2
 python-dateutil>=2.9
