@@ -1,405 +1,187 @@
-# utils/patient_memory.py
+# pages/2_Clinician_Console.py
 from __future__ import annotations
 
 import os
 import json
-import glob
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timezone
+from typing import Any, Dict
 
-DEFAULT_SEED_DIR = "data/patient_seeds"
-EXTRA_SEED_DIR = "data/patient_memory"          # ← new: your extra seed directory
-DEFAULT_DB_PATH = Path("data/patient_db.json")
-DEFAULT_DB_GLOB = "data/patient_db/*.json"
+import pandas as pd
+import streamlit as st
+from dotenv import load_dotenv
 
-MEMORY_LOG_DIR = Path("data/memory")
-MEMORY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+from utils.patient_memory import PatientMemory
+from utils.database_ops import get_patient_record, update_patient_record
 
-def _now_iso() -> str:
-    # Naive ISO is fine; we normalize to UTC epoch when sorting
-    return datetime.now().isoformat(timespec="seconds")
+# ---------- boot ----------
+load_dotenv()
+for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
+    if k in st.secrets and st.secrets[k]:
+        os.environ[k] = str(st.secrets[k]).strip()
 
-def _to_epoch(ts) -> float:
-    """
-    Convert assorted timestamp forms to a single sortable number (UTC epoch seconds).
-    Returns -inf on failure so bad timestamps land at the beginning.
-    """
+st.set_page_config(page_title="Clinician Console", page_icon="🩺", layout="wide")
+st.title("🩺 Clinician Console")
+st.caption("Demo — not medical advice. View patient context, recent activity, and plans.")
+
+# ---------- session singletons ----------
+if "pmemory" not in st.session_state:
+    st.session_state.pmemory = PatientMemory()
+_mem: PatientMemory = st.session_state.pmemory
+
+# ---------- helpers ----------
+def _safe_seed_obj_to_dict(obj: Any) -> Dict[str, Any]:
+    """Return a dict patient record whether obj is already a dict or an object with .data."""
+    if isinstance(obj, dict):
+        return obj
+    if obj is None:
+        return {}
+    # dataclass or simple container with .data
+    data_attr = getattr(obj, "data", None)
+    if isinstance(data_attr, dict):
+        return data_attr
+    # last resort: try __dict__
     try:
-        if isinstance(ts, (int, float)):
-            return float(ts)
-        if isinstance(ts, str) and ts.strip():
-            s = ts.strip().rstrip("Z")  # tolerate trailing Z
-            dt = datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                # treat naive as UTC to avoid local-tz surprises
-                dt = dt.replace(tzinfo=timezone.utc)
-            else:
-                dt = dt.astimezone(timezone.utc)
-            return dt.timestamp()
+        if hasattr(obj, "__dict__"):
+            return dict(obj.__dict__)
     except Exception:
         pass
-    return float("-inf")
+    return {}
 
-@dataclass
-class _Patient:
-    patient_id: str
-    data: Dict[str, Any]
-
-class PatientMemory:
-    """
-    Lightweight, file-backed patient memory:
-    - Loads 'seed' patient JSON files from OFFLINE_PATIENT_DIR (or default).
-    - Also loads from data/patient_memory/ (project's extra seed dir).
-    - Merges in data from data/patient_db.json and data/patient_db/*.json.
-    - Registers stub patients found only in data/memory/*.jsonl logs.
-    - Persists per-patient events into data/memory/<patient_id>.jsonl
-    - Provides summary, retrieval, and recent-window helpers.
-    """
-
-    def __init__(self, seed_dir: Optional[str] = None):
-        self.seed_dir: str = seed_dir or os.environ.get("OFFLINE_PATIENT_DIR", DEFAULT_SEED_DIR)
-        Path(self.seed_dir).mkdir(parents=True, exist_ok=True)
-
-        self.patients: Dict[str, _Patient | Dict[str, Any]] = {}
-        self.history: Dict[str, List[Dict[str, Any]]] = {}   # unified events (notes, bookings, etc.)
-        self.sessions: Dict[str, List[Dict[str, Any]]] = {}  # optional session logs
-
-        self.reload_from_dir(self.seed_dir)
-
-    # -----------------------------
-    # Seed/DB loading (merged) + logs
-    # -----------------------------
-    def reload_from_dir(self, seed_dir: str) -> None:
-        """Load/merge patients from seeds, extra dir, DB, then register any missing from memory logs."""
-        self.seed_dir = seed_dir
-        self.patients.clear()
-        self.history.clear()
-        self.sessions.clear()
-
-        # A) Always load configured seed folder
-        self._load_seed_folder(seed_dir)
-
-        # B) Also load project-specific extra seed folder
-        if os.path.isdir(EXTRA_SEED_DIR):
-            self._load_seed_folder(EXTRA_SEED_DIR)
-
-        # C) Merge DB fallback (adds any not already present)
-        self._load_from_patient_db_fallback_merge()
-
-        # D) Load per-patient memory logs; auto-register stubs for log-only patients
-        for fp in sorted(glob.glob(str(MEMORY_LOG_DIR / "*.jsonl"))):
-            pid = Path(fp).stem
-            rows: List[Dict[str, Any]] = []
-            try:
-                with open(fp, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rows.append(json.loads(line))
-                        except Exception:
-                            continue
-            except Exception:
-                rows = []
-            if rows:
-                self.history.setdefault(pid, []).extend(rows)
-            if pid not in self.patients:
-                self._register_stub_patient(pid)
-
-    def _load_seed_folder(self, folder: str) -> None:
-        """Load patients from a seed folder (expects *.json files)."""
-        for fp in sorted(glob.glob(os.path.join(folder, "*.json"))):
-            try:
-                data = json.loads(Path(fp).read_text(encoding="utf-8"))
-            except Exception:
-                continue
-
-            if isinstance(data, list):
-                for rec in data:
-                    self._ingest_patient_record(rec)
-            elif isinstance(data, dict):
-                # container or single record
-                if "patients" in data and isinstance(data["patients"], list):
-                    for rec in data["patients"]:
-                        self._ingest_patient_record(rec)
-                else:
-                    self._ingest_patient_record(data)
-
-    def _is_db_patient_map(self, data: Dict[str, Any]) -> bool:
-        """Heuristic: dict keyed by patient IDs (e.g., 'patient_001')."""
+def _latest_plan_for_patient(pid: str):
+    """Return (query, steps) for the most recent plan in data/traces.jsonl for this patient."""
+    traces_path = Path("data/traces.jsonl")
+    if not traces_path.exists():
+        return None, None
+    try:
+        lines = traces_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None, None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
         try:
-            return any(str(k).startswith("patient_") for k in data.keys())
+            row = json.loads(line)
         except Exception:
-            return False
+            continue
+        if row.get("type") == "plan" and row.get("patient_id") == pid:
+            return row.get("query"), row.get("steps") or []
+    return None, None
 
-    def _load_from_patient_db_fallback_merge(self) -> None:
-        """Add patients from patient_db files if they aren't already loaded from seeds."""
-        # A) data/patient_db.json
-        if DEFAULT_DB_PATH.exists():
-            try:
-                data = json.loads(DEFAULT_DB_PATH.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    if self._is_db_patient_map(data):
-                        for pid, rec in data.items():
-                            if pid not in self.patients and isinstance(rec, dict):
-                                rec = dict(rec); rec.setdefault("patient_id", pid)
-                                self._ingest_patient_record(rec)
-                    else:
-                        pid = data.get("patient_id") or data.get("id") or data.get("pid")
-                        if pid and pid not in self.patients:
-                            self._ingest_patient_record(data)
-                elif isinstance(data, list):
-                    for rec in data:
-                        if isinstance(rec, dict):
-                            pid = rec.get("patient_id") or rec.get("id") or rec.get("pid")
-                            if pid and pid not in self.patients:
-                                self._ingest_patient_record(rec)
-            except Exception:
-                pass
+def _get_patient_dir_row(pid: str) -> dict | None:
+    """Combine seed directory info with DB record; robust to patients[pid] being dict or object."""
+    sd_obj = None
+    try:
+        sd_obj = _mem.patients.get(pid) if getattr(_mem, "patients", None) else None
+    except Exception:
+        sd_obj = None
 
-        # B) data/patient_db/*.json
-        for fp in sorted(glob.glob(DEFAULT_DB_GLOB)):
-            try:
-                data = json.loads(Path(fp).read_text(encoding="utf-8"))
-            except Exception:
-                continue
+    sd = _safe_seed_obj_to_dict(sd_obj)
+    db = get_patient_record(pid) or {}
+    merged = dict(sd)
+    # merge DB on top (DB wins)
+    for k, v in (db or {}).items():
+        merged[k] = v
+    merged["patient_id"] = pid
+    return merged or None
 
-            if isinstance(data, dict):
-                if self._is_db_patient_map(data):
-                    for pid, rec in data.items():
-                        if pid not in self.patients and isinstance(rec, dict):
-                            rec = dict(rec); rec.setdefault("patient_id", pid)
-                            self._ingest_patient_record(rec)
-                else:
-                    pid = data.get("patient_id") or data.get("id") or data.get("pid")
-                    if pid and pid not in self.patients:
-                        self._ingest_patient_record(data)
-            elif isinstance(data, list):
-                for rec in data:
-                    if isinstance(rec, dict):
-                        pid = rec.get("patient_id") or rec.get("id") or rec.get("pid")
-                        if pid and pid not in self.patients:
-                            self._ingest_patient_record(rec)
+# ---------- sidebar patient picker ----------
+with st.sidebar:
+    st.header("Patient")
+    directory = _mem.list_patients()
+    if not directory:
+        st.warning("No patients loaded. Use the Developer Console to import seeds.")
+        st.stop()
 
-    def _register_stub_patient(self, pid: str) -> None:
-        """Create a minimal patient entry so log-only patients show up in UIs."""
-        stub = {
-            "patient_id": pid,
-            "name": pid.replace("_", " ").title(),
-            "conditions": [],
-            "appointments": [],
-            "history": [],
-        }
-        self.patients[pid] = _Patient(patient_id=pid, data=stub)
+    label_map = {f"{r.get('name', r.get('patient_id'))} ({r.get('patient_id')})": r["patient_id"] for r in directory}
+    sel_label = st.selectbox("Select patient", list(label_map.keys()))
+    pid = label_map[sel_label]
 
-    # -----------------------------
-    # Ingest + persistence
-    # -----------------------------
-    def _ingest_patient_db_dict(self, db: Dict[str, Any]) -> None:
-        """db is a dict keyed by patient_id → record dict."""
-        for pid, rec in db.items():
-            if not isinstance(rec, dict):
-                continue
-            rec = dict(rec)
-            rec.setdefault("patient_id", pid)
-            self._ingest_patient_record(rec)
-
-    def _ingest_patient_record(self, rec: Dict[str, Any]) -> None:
-        """Normalize and store a patient record (maps profile.full_name & entries)."""
-        if not isinstance(rec, dict):
-            return
-
-        # NEW: normalize name from profile.full_name when 'name' missing
-        if "name" not in rec and isinstance(rec.get("profile"), dict):
-            fn = rec["profile"].get("full_name")
-            if isinstance(fn, str) and fn.strip():
-                rec["name"] = fn.strip()
-
-        # Choose/generate patient_id
-        pid = rec.get("patient_id") or rec.get("id") or rec.get("pid")
-        if not pid:
-            name_for_id = (rec.get("name") or rec.get("profile", {}).get("full_name") or "patient")
-            pid = name_for_id.lower().replace(" ", "_")
-
-        # Store as dataclass-backed entry
-        self.patients[pid] = _Patient(patient_id=pid, data=rec)
-
-        # Normalize embedded history + appointments + entries as events with timestamps
-        def _ensure_ts(x):
-            if isinstance(x, dict) and not x.get("ts"):
-                x["ts"] = x.get("date") or x.get("timestamp") or _now_iso()
-            return x
-
-        # Existing support
-        hist = rec.get("history") or []
-        if isinstance(hist, dict):
-            hist = [hist]
-        hist = [_ensure_ts(h) for h in hist if isinstance(h, dict)]
-
-        # NEW: map entries → history
-        entries = rec.get("entries") or []
-        if isinstance(entries, dict):
-            entries = [entries]
-        entries = [_ensure_ts(e) for e in entries if isinstance(e, dict)]
-
-        # Existing support
-        appts = rec.get("appointments") or []
+# ---------- top section: patient overview ----------
+info = _get_patient_dir_row(pid)
+if info:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.subheader(info.get("name", pid))
+        st.write(f"**Patient ID:** {pid}")
+        if info.get("age") is not None:
+            st.write(f"**Age:** {info['age']}")
+        conds = info.get("conditions") or []
+        if isinstance(conds, (list, tuple)):
+            st.write("**Conditions:**", ", ".join(map(str, conds)) if conds else "—")
+        else:
+            st.write("**Conditions:**", str(conds) if conds else "—")
+    with col2:
+        st.subheader("Summary")
+        try:
+            st.write(_mem.get_summary(pid) or "—")
+        except Exception as e:
+            st.write("—")
+    with col3:
+        st.subheader("Appointments")
+        appts = info.get("appointments") or []
+        # Normalize to list[dict]
         if isinstance(appts, dict):
             appts = [appts]
-        appts = [_ensure_ts({"type": "appointment", **a}) for a in appts if isinstance(a, dict)]
-
-        merged = []
-        if hist:     merged.extend(hist)
-        if entries:  merged.extend(entries)   # ← include custom entries
-        if appts:    merged.extend(appts)
-
-        if merged:
-            self.history.setdefault(pid, []).extend(merged)
-
-    def save_patient_json(self, rec: Dict[str, Any], dir_path: Optional[str] = None) -> str:
-        """Write a patient JSON file into the seed directory and return path."""
-        d = dir_path or self.seed_dir
-        Path(d).mkdir(parents=True, exist_ok=True)
-        pid = rec.get("patient_id") or rec.get("id") or rec.get("pid") or \
-              (rec.get("name", rec.get("profile", {}).get("full_name", "patient")).lower().replace(" ", "_"))
-        out = Path(d) / f"{pid}.json"
-        out.write_text(json.dumps(rec, indent=2), encoding="utf-8")
-        return str(out)
-
-    # -----------------------------
-    # Memory operations
-    # -----------------------------
-    def record_event(self, patient_id: str, text: str, meta: Optional[Dict[str, Any]] = None) -> None:
-        """Append a memory event and persist to data/memory/<patient_id>.jsonl"""
-        if not patient_id:
-            return
-        row = {
-            "ts": _now_iso(),
-            "type": "event",
-            "text": text,
-            "meta": meta or {},
-        }
-        self.history.setdefault(patient_id, []).append(row)
-        log_path = MEMORY_LOG_DIR / f"{patient_id}.jsonl"
-        try:
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(row) + "\n")
-        except Exception:
-            pass
-
-    def get_window(self, patient_id: str, k: int = 10) -> List[Dict[str, Any]]:
-        """
-        Safe recent activity window:
-        - Backfills ts when missing,
-        - Normalizes to UTC epoch seconds for sorting (no tz errors),
-        - Returns most-recent first.
-        """
-        raw = self.history.get(patient_id, []) + self.sessions.get(patient_id, [])
-        entries = [e for e in raw if isinstance(e, dict)]
-
-        # Backfill ts from common aliases; fallback to now if still missing
-        now_iso = _now_iso()
-        for e in entries:
-            if not e.get("ts"):
-                e["ts"] = e.get("timestamp") or e.get("time") or e.get("date") or now_iso
-
-        # Sort safely by epoch seconds (floats), avoiding naive/aware datetime comparisons
-        entries.sort(key=lambda e: _to_epoch(e.get("ts")))
-        return list(reversed(entries[-k:]))
-
-    def search(self, patient_id: str, query: str, k: int = 3) -> List[str]:
-        """Simple keyword search over recent memory texts + seed history notes."""
-        if not query:
-            return []
-        q = query.lower()
-        hits: List[Tuple[float, str]] = []
-
-        for row in self.history.get(patient_id, []):
-            txt = (row.get("text") or
-                   row.get("notes") or
-                   row.get("diagnosis") or "")
-            if not isinstance(txt, str):
-                continue
-            t = txt.lower()
-            if q in t:
-                hits.append((1.0, txt))
+        if isinstance(appts, (list, tuple)) and appts:
+            norm = []
+            for a in appts:
+                if isinstance(a, dict):
+                    norm.append({k: a.get(k) for k in a.keys()})
+            if norm:
+                st.dataframe(pd.DataFrame(norm), use_container_width=True, height=180)
             else:
-                # tiny heuristic: overlap of words
-                qw = set(w for w in q.split() if len(w) > 2)
-                tw = set(w for w in t.split() if len(w) > 2)
-                score = len(qw & tw) / max(1, len(qw))
-                if score > 0:
-                    hits.append((score, txt))
+                st.write("—")
+        else:
+            st.write("—")
+else:
+    st.info("No summary available for this patient.")
 
-        # fall back to seed patient top-level fields (like conditions)
-        p = self.patients.get(patient_id)
-        base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
-        if p and not hits:
-            conds = base.get("conditions") or []
-            for c in conds:
-                t = str(c)
-                if q in t.lower():
-                    hits.append((0.5, f"Condition match: {t}"))
+# ---------- recent activity ----------
+st.markdown("---")
+st.subheader("Recent Activity")
+try:
+    window = _mem.get_window(pid, k=8)
+except Exception as e:
+    st.error(f"Could not load recent activity: {e}")
+    window = []
 
-        hits.sort(key=lambda x: x[0], reverse=True)
-        return [h[1] for h in hits[:k]]
+if window:
+    for row in window:
+        ts = row.get("ts", "—")
+        typ = row.get("type") or row.get("tag") or "event"
+        txt = row.get("text") or row.get("notes") or row.get("diagnosis") or json.dumps(row)[:200]
+        st.write(f"- [{typ} @ {ts}] {txt}")
+else:
+    st.write("No recent activity.")
 
-    def get_summary(self, patient_id: str) -> str:
-        """Compact one-paragraph summary from seed/DB record + last activity."""
-        p = self.patients.get(patient_id)
-        base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
-        if not base:
-            return ""
-        name = base.get("name", patient_id)
-        age = base.get("age")
-        conds = base.get("conditions") or []
+# ---------- latest plan widget ----------
+st.markdown("---")
+st.subheader("Latest agent plan for this patient")
+q, steps = _latest_plan_for_patient(pid)
+if q or steps:
+    if q:
+        st.write("**User request that was planned:**", q)
+    if steps:
+        st.markdown("**Plan steps:**")
+        for i, s in enumerate(steps, 1):
+            st.write(f"{i}. {s}")
+else:
+    st.info("No plan logged for this patient yet. Trigger a request on the Patient page to generate one.")
 
-        last_appt = None
-        appts = base.get("appointments") or []
-        if isinstance(appts, dict):
-            appts = [appts]
-        if appts:
-            try:
-                appts_sorted = sorted(appts, key=lambda a: _to_epoch(a.get("date")), reverse=True)
-                last_appt = appts_sorted[0]
-            except Exception:
-                last_appt = appts[-1]
-
-        recent = self.get_window(patient_id, k=3)
-        recent_blurbs = []
-        for r in recent:
-            txt = r.get("text") or r.get("notes") or r.get("diagnosis") or ""
-            typ = r.get("type") or r.get("tag") or "event"
-            ts = r.get("ts")
-            if txt:
-                recent_blurbs.append(f"[{typ} @ {ts}] {txt}")
-
-        parts = [
-            f"{name}" + (f", {age}" if age is not None else ""),
-            f"Conditions: {', '.join(map(str, conds)) or '—'}",
-        ]
-        if last_appt:
-            parts.append(
-                f"Last appointment: {last_appt.get('date')} — {last_appt.get('doctor','(unknown)')} ({last_appt.get('status','')})"
-            )
-        if recent_blurbs:
-            parts.append("Recent: " + " | ".join(recent_blurbs))
-
-        return " | ".join(parts)
-
-    def list_patients(self) -> List[Dict[str, Any]]:
-        """Lightweight patient directory for UI select boxes."""
-        rows: List[Dict[str, Any]] = []
-        for pid, p in self.patients.items():
-            base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
-            rows.append({
-                "patient_id": pid,
-                "name": base.get("name", pid),
-                "age": base.get("age"),
-                "conditions": ", ".join(map(str, base.get("conditions") or [])),
-            })
-        rows.sort(key=lambda r: (str(r.get("name") or ""), str(r.get("patient_id") or "")))
-        return rows
+# ---------- clinician note add ----------
+st.markdown("---")
+st.subheader("Add a clinician note")
+note = st.text_area("Note", placeholder="e.g., Follow-up needed on BP logs; check labs next visit.")
+if st.button("Save note"):
+    try:
+        # Save to DB
+        ok = update_patient_record(pid, {"latest_note": note})
+        # Record into memory log so it shows up under Recent Activity
+        _mem.record_event(pid, text=f"[Clinician note] {note}", meta={"source": "clinician_console"})
+        if ok:
+            st.success("Note saved.")
+        else:
+            st.info("Record updated locally (DB may be read-only in this environment).")
+    except Exception as e:
+        st.error(f"Failed to save note: {e}")
