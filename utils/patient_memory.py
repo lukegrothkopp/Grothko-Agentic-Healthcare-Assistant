@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 
 DEFAULT_SEED_DIR = "data/patient_seeds"
+EXTRA_SEED_DIR = "data/patient_memory"          # ← new: your extra seed directory
 DEFAULT_DB_PATH = Path("data/patient_db.json")
 DEFAULT_DB_GLOB = "data/patient_db/*.json"
 
@@ -50,7 +51,9 @@ class PatientMemory:
     """
     Lightweight, file-backed patient memory:
     - Loads 'seed' patient JSON files from OFFLINE_PATIENT_DIR (or default).
-    - If seeds are empty/missing, FALLS BACK to data/patient_db.json and data/patient_db/*.json.
+    - Also loads from data/patient_memory/ (project's extra seed dir).
+    - Merges in data from data/patient_db.json and data/patient_db/*.json.
+    - Registers stub patients found only in data/memory/*.jsonl logs.
     - Persists per-patient events into data/memory/<patient_id>.jsonl
     - Provides summary, retrieval, and recent-window helpers.
     """
@@ -66,23 +69,26 @@ class PatientMemory:
         self.reload_from_dir(self.seed_dir)
 
     # -----------------------------
-    # Seed loading / persistence
+    # Seed/DB loading (merged) + logs
     # -----------------------------
     def reload_from_dir(self, seed_dir: str) -> None:
-        """Load patient JSON files from a folder; rebuild in-memory index."""
+        """Load/merge patients from seeds, extra dir, DB, then register any missing from memory logs."""
         self.seed_dir = seed_dir
         self.patients.clear()
         self.history.clear()
         self.sessions.clear()
 
-        # 1) Try seeds in the configured folder
+        # A) Always load configured seed folder
         self._load_seed_folder(seed_dir)
 
-        # 2) If still empty, FALLBACK to patient_db.json and data/patient_db/*.json
-        if not self.patients:
-            self._load_from_patient_db_fallback()
+        # B) Also load project-specific extra seed folder
+        if os.path.isdir(EXTRA_SEED_DIR):
+            self._load_seed_folder(EXTRA_SEED_DIR)
 
-        # 3) Load per-patient memory logs
+        # C) Merge DB fallback (adds any not already present)
+        self._load_from_patient_db_fallback_merge()
+
+        # D) Load per-patient memory logs; auto-register stubs for log-only patients
         for fp in sorted(glob.glob(str(MEMORY_LOG_DIR / "*.jsonl"))):
             pid = Path(fp).stem
             rows: List[Dict[str, Any]] = []
@@ -100,6 +106,8 @@ class PatientMemory:
                 rows = []
             if rows:
                 self.history.setdefault(pid, []).extend(rows)
+            if pid not in self.patients:
+                self._register_stub_patient(pid)
 
     def _load_seed_folder(self, folder: str) -> None:
         """Load patients from a seed folder (expects *.json files)."""
@@ -120,33 +128,76 @@ class PatientMemory:
                 else:
                     self._ingest_patient_record(data)
 
-    def _load_from_patient_db_fallback(self) -> None:
-        """Fallback loader from the legacy DB files if seed folder is empty."""
-        # A) data/patient_db.json (dict keyed by patient_id)
+    def _is_db_patient_map(self, data: Dict[str, Any]) -> bool:
+        """Heuristic: dict keyed by patient IDs (e.g., 'patient_001')."""
+        try:
+            return any(str(k).startswith("patient_") for k in data.keys())
+        except Exception:
+            return False
+
+    def _load_from_patient_db_fallback_merge(self) -> None:
+        """Add patients from patient_db files if they aren't already loaded from seeds."""
+        # A) data/patient_db.json
         if DEFAULT_DB_PATH.exists():
             try:
                 data = json.loads(DEFAULT_DB_PATH.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
-                    self._ingest_patient_db_dict(data)
+                    if self._is_db_patient_map(data):
+                        for pid, rec in data.items():
+                            if pid not in self.patients and isinstance(rec, dict):
+                                rec = dict(rec); rec.setdefault("patient_id", pid)
+                                self._ingest_patient_record(rec)
+                    else:
+                        pid = data.get("patient_id") or data.get("id") or data.get("pid")
+                        if pid and pid not in self.patients:
+                            self._ingest_patient_record(data)
+                elif isinstance(data, list):
+                    for rec in data:
+                        if isinstance(rec, dict):
+                            pid = rec.get("patient_id") or rec.get("id") or rec.get("pid")
+                            if pid and pid not in self.patients:
+                                self._ingest_patient_record(rec)
             except Exception:
                 pass
 
-        # B) any loose JSONs under data/patient_db/*.json
+        # B) data/patient_db/*.json
         for fp in sorted(glob.glob(DEFAULT_DB_GLOB)):
             try:
                 data = json.loads(Path(fp).read_text(encoding="utf-8"))
             except Exception:
                 continue
-            # If it's a dict of patients keyed by id
-            if isinstance(data, dict) and "patient_001" in data or any(k.startswith("patient_") for k in data.keys()):
-                self._ingest_patient_db_dict(data)
-            # Or a single record / list of records
-            elif isinstance(data, dict):
-                self._ingest_patient_record(data)
+
+            if isinstance(data, dict):
+                if self._is_db_patient_map(data):
+                    for pid, rec in data.items():
+                        if pid not in self.patients and isinstance(rec, dict):
+                            rec = dict(rec); rec.setdefault("patient_id", pid)
+                            self._ingest_patient_record(rec)
+                else:
+                    pid = data.get("patient_id") or data.get("id") or data.get("pid")
+                    if pid and pid not in self.patients:
+                        self._ingest_patient_record(data)
             elif isinstance(data, list):
                 for rec in data:
-                    self._ingest_patient_record(rec)
+                    if isinstance(rec, dict):
+                        pid = rec.get("patient_id") or rec.get("id") or rec.get("pid")
+                        if pid and pid not in self.patients:
+                            self._ingest_patient_record(rec)
 
+    def _register_stub_patient(self, pid: str) -> None:
+        """Create a minimal patient entry so log-only patients show up in UIs."""
+        stub = {
+            "patient_id": pid,
+            "name": pid.replace("_", " ").title(),
+            "conditions": [],
+            "appointments": [],
+            "history": [],
+        }
+        self.patients[pid] = _Patient(patient_id=pid, data=stub)
+
+    # -----------------------------
+    # Ingest + persistence
+    # -----------------------------
     def _ingest_patient_db_dict(self, db: Dict[str, Any]) -> None:
         """db is a dict keyed by patient_id → record dict."""
         for pid, rec in db.items():
@@ -157,43 +208,63 @@ class PatientMemory:
             self._ingest_patient_record(rec)
 
     def _ingest_patient_record(self, rec: Dict[str, Any]) -> None:
-        """Normalize and store a patient record."""
+        """Normalize and store a patient record (maps profile.full_name & entries)."""
         if not isinstance(rec, dict):
             return
+
+        # NEW: normalize name from profile.full_name when 'name' missing
+        if "name" not in rec and isinstance(rec.get("profile"), dict):
+            fn = rec["profile"].get("full_name")
+            if isinstance(fn, str) and fn.strip():
+                rec["name"] = fn.strip()
+
+        # Choose/generate patient_id
         pid = rec.get("patient_id") or rec.get("id") or rec.get("pid")
         if not pid:
-            # generate a simple deterministic ID from name if present
-            name = (rec.get("name") or "patient").lower().replace(" ", "_")
-            pid = f"{name}_{len(self.patients) + 1}"
+            name_for_id = (rec.get("name") or rec.get("profile", {}).get("full_name") or "patient")
+            pid = name_for_id.lower().replace(" ", "_")
 
-        # allow downstream to handle either dict or dataclass
+        # Store as dataclass-backed entry
         self.patients[pid] = _Patient(patient_id=pid, data=rec)
 
-        # Normalize embedded history + appointments as events with timestamps
+        # Normalize embedded history + appointments + entries as events with timestamps
         def _ensure_ts(x):
             if isinstance(x, dict) and not x.get("ts"):
                 x["ts"] = x.get("date") or x.get("timestamp") or _now_iso()
             return x
 
+        # Existing support
         hist = rec.get("history") or []
         if isinstance(hist, dict):
             hist = [hist]
         hist = [_ensure_ts(h) for h in hist if isinstance(h, dict)]
 
+        # NEW: map entries → history
+        entries = rec.get("entries") or []
+        if isinstance(entries, dict):
+            entries = [entries]
+        entries = [_ensure_ts(e) for e in entries if isinstance(e, dict)]
+
+        # Existing support
         appts = rec.get("appointments") or []
         if isinstance(appts, dict):
             appts = [appts]
         appts = [_ensure_ts({"type": "appointment", **a}) for a in appts if isinstance(a, dict)]
 
-        if hist or appts:
-            self.history.setdefault(pid, []).extend(hist + appts)
+        merged = []
+        if hist:     merged.extend(hist)
+        if entries:  merged.extend(entries)   # ← include custom entries
+        if appts:    merged.extend(appts)
+
+        if merged:
+            self.history.setdefault(pid, []).extend(merged)
 
     def save_patient_json(self, rec: Dict[str, Any], dir_path: Optional[str] = None) -> str:
         """Write a patient JSON file into the seed directory and return path."""
         d = dir_path or self.seed_dir
         Path(d).mkdir(parents=True, exist_ok=True)
         pid = rec.get("patient_id") or rec.get("id") or rec.get("pid") or \
-              (rec.get("name", "patient").lower().replace(" ", "_"))
+              (rec.get("name", rec.get("profile", {}).get("full_name", "patient")).lower().replace(" ", "_"))
         out = Path(d) / f"{pid}.json"
         out.write_text(json.dumps(rec, indent=2), encoding="utf-8")
         return str(out)
@@ -332,3 +403,4 @@ class PatientMemory:
             })
         rows.sort(key=lambda r: (str(r.get("name") or ""), str(r.get("patient_id") or "")))
         return rows
+
