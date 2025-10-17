@@ -21,7 +21,7 @@ for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
 
 st.set_page_config(page_title="Clinician Console", page_icon="🩺", layout="wide")
 st.title("🩺 Clinician Console")
-st.caption("Demo — not medical advice. View patient context, recent activity, and plans.")
+st.caption("View patient context, recent activity, and plans.")
 
 # ---------- session singletons ----------
 if "pmemory" not in st.session_state:
