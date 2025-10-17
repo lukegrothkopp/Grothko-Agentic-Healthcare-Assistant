@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
+from typing import Any, Dict
 
 import pandas as pd
 import streamlit as st
@@ -28,6 +29,24 @@ if "pmemory" not in st.session_state:
 _mem: PatientMemory = st.session_state.pmemory
 
 # ---------- helpers ----------
+def _safe_seed_obj_to_dict(obj: Any) -> Dict[str, Any]:
+    """Return a dict patient record whether obj is already a dict or an object with .data."""
+    if isinstance(obj, dict):
+        return obj
+    if obj is None:
+        return {}
+    # dataclass or simple container with .data
+    data_attr = getattr(obj, "data", None)
+    if isinstance(data_attr, dict):
+        return data_attr
+    # last resort: try __dict__
+    try:
+        if hasattr(obj, "__dict__"):
+            return dict(obj.__dict__)
+    except Exception:
+        pass
+    return {}
+
 def _latest_plan_for_patient(pid: str):
     """Return (query, steps) for the most recent plan in data/traces.jsonl for this patient."""
     traces_path = Path("data/traces.jsonl")
@@ -50,8 +69,14 @@ def _latest_plan_for_patient(pid: str):
     return None, None
 
 def _get_patient_dir_row(pid: str) -> dict | None:
-    """Combine seed directory info with DB record for a richer summary."""
-    sd = _mem.patients.get(pid).data if pid in _mem.patients else {}
+    """Combine seed directory info with DB record; robust to patients[pid] being dict or object."""
+    sd_obj = None
+    try:
+        sd_obj = _mem.patients.get(pid) if getattr(_mem, "patients", None) else None
+    except Exception:
+        sd_obj = None
+
+    sd = _safe_seed_obj_to_dict(sd_obj)
     db = get_patient_record(pid) or {}
     merged = dict(sd)
     # merge DB on top (DB wins)
@@ -68,7 +93,7 @@ with st.sidebar:
         st.warning("No patients loaded. Use the Developer Console to import seeds.")
         st.stop()
 
-    label_map = {f"{r['name']} ({r['patient_id']})": r["patient_id"] for r in directory}
+    label_map = {f"{r.get('name', r.get('patient_id'))} ({r.get('patient_id')})": r["patient_id"] for r in directory}
     sel_label = st.selectbox("Select patient", list(label_map.keys()))
     pid = label_map[sel_label]
 
@@ -81,17 +106,32 @@ if info:
         st.write(f"**Patient ID:** {pid}")
         if info.get("age") is not None:
             st.write(f"**Age:** {info['age']}")
-        if info.get("conditions"):
-            st.write("**Conditions:**", ", ".join(map(str, info.get("conditions", []))) )
+        conds = info.get("conditions") or []
+        if isinstance(conds, (list, tuple)):
+            st.write("**Conditions:**", ", ".join(map(str, conds)) if conds else "—")
+        else:
+            st.write("**Conditions:**", str(conds) if conds else "—")
     with col2:
         st.subheader("Summary")
-        st.write(_mem.get_summary(pid) or "—")
+        try:
+            st.write(_mem.get_summary(pid) or "—")
+        except Exception as e:
+            st.write("—")
     with col3:
         st.subheader("Appointments")
         appts = info.get("appointments") or []
-        if appts:
-            df = pd.DataFrame([{k: a.get(k) for k in a.keys()} for a in appts])
-            st.dataframe(df, use_container_width=True, height=180)
+        # Normalize to list[dict]
+        if isinstance(appts, dict):
+            appts = [appts]
+        if isinstance(appts, (list, tuple)) and appts:
+            norm = []
+            for a in appts:
+                if isinstance(a, dict):
+                    norm.append({k: a.get(k) for k in a.keys()})
+            if norm:
+                st.dataframe(pd.DataFrame(norm), use_container_width=True, height=180)
+            else:
+                st.write("—")
         else:
             st.write("—")
 else:
