@@ -3,185 +3,279 @@ from __future__ import annotations
 
 import os
 import json
+from typing import Any, Dict, List, Optional
+from datetime import date
 from pathlib import Path
-from typing import Any, Dict
 
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
 
-from utils.patient_memory import PatientMemory
-from utils.database_ops import get_patient_record, update_patient_record
+# Local utilities
+from utils.patient_memory import PatientMemory, _to_epoch  # uses your updated, robust loader/sorter
 
-# ---------- boot ----------
-load_dotenv()
-for k in ("OPENAI_API_KEY", "OPENAI_MODEL", "SERPAPI_API_KEY", "ADMIN_TOKEN"):
-    if k in st.secrets and st.secrets[k]:
-        os.environ[k] = str(st.secrets[k]).strip()
-
-st.set_page_config(page_title="Clinician Console", page_icon="🩺", layout="wide")
+# -------------------------
+# Small CSS polish
+# -------------------------
+CSS = """
+<style>
+.badge {
+  display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px;
+  background:#F0F2F6; border:1px solid #E5E7EB; margin-right:8px;
+}
+.card {
+  border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px 16px; background: #fff;
+}
+.subtitle {
+  color: #6b7280; font-size: 0.9rem; margin-bottom: 8px;
+}
+.kv { color:#374151; }
+.kv b { color:#111827; }
+.timeline-item {
+  padding:8px 0; border-bottom:1px dashed #eee;
+}
+.timeline-item:last-child { border-bottom: none; }
+.small-muted { color:#6b7280; font-size:0.85rem; }
+.section-title {
+  font-weight: 600; margin-top: 4px;
+}
+</style>
+"""
+st.set_page_config(page_title="Clinician Console", layout="wide")
+st.markdown(CSS, unsafe_allow_html=True)
 st.title("🩺 Clinician Console")
-st.caption("Demo — not medical advice. View patient context, recent activity, and plans.")
+st.caption("Read-only clinical summary derived from seeds/DB + runtime memory. Not for medical advice.")
 
-# ---------- session singletons ----------
+# -------------------------
+# Session-scoped memory
+# -------------------------
 if "pmemory" not in st.session_state:
     st.session_state.pmemory = PatientMemory()
 _mem: PatientMemory = st.session_state.pmemory
 
-# ---------- helpers ----------
-def _safe_seed_obj_to_dict(obj: Any) -> Dict[str, Any]:
-    """Return a dict patient record whether obj is already a dict or an object with .data."""
-    if isinstance(obj, dict):
-        return obj
-    if obj is None:
-        return {}
-    # dataclass or simple container with .data
-    data_attr = getattr(obj, "data", None)
-    if isinstance(data_attr, dict):
-        return data_attr
-    # last resort: try __dict__
-    try:
-        if hasattr(obj, "__dict__"):
-            return dict(obj.__dict__)
-    except Exception:
-        pass
-    return {}
-
-def _latest_plan_for_patient(pid: str):
-    """Return (query, steps) for the most recent plan in data/traces.jsonl for this patient."""
-    traces_path = Path("data/traces.jsonl")
-    if not traces_path.exists():
-        return None, None
-    try:
-        lines = traces_path.read_text(encoding="utf-8").splitlines()
-    except Exception:
-        return None, None
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except Exception:
-            continue
-        if row.get("type") == "plan" and row.get("patient_id") == pid:
-            return row.get("query"), row.get("steps") or []
-    return None, None
-
-def _get_patient_dir_row(pid: str) -> dict | None:
-    """Combine seed directory info with DB record; robust to patients[pid] being dict or object."""
-    sd_obj = None
-    try:
-        sd_obj = _mem.patients.get(pid) if getattr(_mem, "patients", None) else None
-    except Exception:
-        sd_obj = None
-
-    sd = _safe_seed_obj_to_dict(sd_obj)
-    db = get_patient_record(pid) or {}
-    merged = dict(sd)
-    # merge DB on top (DB wins)
-    for k, v in (db or {}).items():
-        merged[k] = v
-    merged["patient_id"] = pid
-    return merged or None
-
-# ---------- sidebar patient picker ----------
+# -------------------------
+# Sidebar: patient picker
+# -------------------------
 with st.sidebar:
     st.header("Patient")
-    directory = _mem.list_patients()
-    if not directory:
-        st.warning("No patients loaded. Use the Developer Console to import seeds.")
+    rows = _mem.list_patients()
+    if not rows:
+        st.info("No patients loaded. Use the Developer Console to import seeds or check data paths.")
         st.stop()
 
-    label_map = {f"{r.get('name', r.get('patient_id'))} ({r.get('patient_id')})": r["patient_id"] for r in directory}
-    sel_label = st.selectbox("Select patient", list(label_map.keys()))
-    pid = label_map[sel_label]
+    label_map = {f"{r['name']} ({r['patient_id']})": r["patient_id"] for r in rows}
+    default_label = list(label_map.keys())[0]
+    sel_label = st.selectbox("Select patient", options=list(label_map.keys()), index=0)
+    pid = label_map.get(sel_label)
 
-# ---------- top section: patient overview ----------
-info = _get_patient_dir_row(pid)
-if info:
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.subheader(info.get("name", pid))
-        st.write(f"**Patient ID:** {pid}")
-        if info.get("age") is not None:
-            st.write(f"**Age:** {info['age']}")
-        conds = info.get("conditions") or []
-        if isinstance(conds, (list, tuple)):
-            st.write("**Conditions:**", ", ".join(map(str, conds)) if conds else "—")
-        else:
-            st.write("**Conditions:**", str(conds) if conds else "—")
-    with col2:
-        st.subheader("Summary")
-        try:
-            st.write(_mem.get_summary(pid) or "—")
-        except Exception as e:
-            st.write("—")
-    with col3:
-        st.subheader("Appointments")
-        appts = info.get("appointments") or []
-        # Normalize to list[dict]
-        if isinstance(appts, dict):
-            appts = [appts]
-        if isinstance(appts, (list, tuple)) and appts:
-            norm = []
-            for a in appts:
-                if isinstance(a, dict):
-                    norm.append({k: a.get(k) for k in a.keys()})
-            if norm:
-                st.dataframe(pd.DataFrame(norm), use_container_width=True, height=180)
-            else:
-                st.write("—")
-        else:
-            st.write("—")
-else:
-    st.info("No summary available for this patient.")
+    # Quick actions
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("Refresh", use_container_width=True):
+            _mem.reload_from_dir(_mem.seed_dir)
+            st.rerun()
+    with colB:
+        if st.button("Add demo note", type="secondary", use_container_width=True):
+            _mem.record_event(pid, "Demo: clinician viewed chart and added a note.", meta={"kind": "note", "by": "clinician"})
+            st.toast("Demo note added.")
+            st.rerun()
 
-# ---------- recent activity ----------
-st.markdown("---")
-st.subheader("Recent Activity")
-try:
-    window = _mem.get_window(pid, k=8)
-except Exception as e:
-    st.error(f"Could not load recent activity: {e}")
-    window = []
+# -------------------------
+# Helpers
+# -------------------------
+def _get_base(pid: str) -> Dict[str, Any]:
+    p = _mem.patients.get(pid)
+    return p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
 
-if window:
-    for row in window:
-        ts = row.get("ts", "—")
-        typ = row.get("type") or row.get("tag") or "event"
-        txt = row.get("text") or row.get("notes") or row.get("diagnosis") or json.dumps(row)[:200]
-        st.write(f"- [{typ} @ {ts}] {txt}")
-else:
-    st.write("No recent activity.")
+def _find_latest_plan(pid: str) -> Optional[List[str]]:
+    """Scan memory events for last plan-like entry; supports various shapes."""
+    events = _mem.history.get(pid, [])
+    for ev in reversed(events):
+        t = (ev.get("type") or "").lower()
+        meta = ev.get("meta") or {}
+        if t in {"plan", "planning", "care_plan"}:
+            steps = ev.get("steps") or meta.get("steps")
+            if isinstance(steps, list) and steps:
+                return [str(s) for s in steps]
+            text = ev.get("text") or meta.get("text")
+            if isinstance(text, str) and text.strip():
+                # naive bulletization
+                parts = [p.strip(" •-") for p in text.split("\n") if p.strip()]
+                if parts:
+                    return parts
+        # fallbacks: detect thing that "looks like" plan
+        if isinstance(meta.get("plan"), list) and meta["plan"]:
+            return [str(s) for s in meta["plan"]]
+    return None
 
-# ---------- latest plan widget ----------
-st.markdown("---")
-st.subheader("Latest agent plan for this patient")
-q, steps = _latest_plan_for_patient(pid)
-if q or steps:
-    if q:
-        st.write("**User request that was planned:**", q)
-    if steps:
-        st.markdown("**Plan steps:**")
-        for i, s in enumerate(steps, 1):
-            st.write(f"{i}. {s}")
-else:
-    st.info("No plan logged for this patient yet. Trigger a request on the Patient page to generate one.")
-
-# ---------- clinician note add ----------
-st.markdown("---")
-st.subheader("Add a clinician note")
-note = st.text_area("Note", placeholder="e.g., Follow-up needed on BP logs; check labs next visit.")
-if st.button("Save note"):
+def _next_upcoming(appts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    today = date.today().isoformat()
+    # appts might be missing/strings; we normalize with _to_epoch
     try:
-        # Save to DB
-        ok = update_patient_record(pid, {"latest_note": note})
-        # Record into memory log so it shows up under Recent Activity
-        _mem.record_event(pid, text=f"[Clinician note] {note}", meta={"source": "clinician_console"})
-        if ok:
-            st.success("Note saved.")
+        fut = [a for a in appts if isinstance(a, dict) and str(a.get("date","")) >= "1900-01-01"]
+        fut.sort(key=lambda a: _to_epoch(a.get("date")))
+        # return first appointment from today forward
+        out = [a for a in fut if (a.get("date") or "") >= today]
+        return out[0] if out else (fut[-1] if fut else None)
+    except Exception:
+        return None
+
+def _appointments_df(base: Dict[str, Any]) -> pd.DataFrame:
+    appts = base.get("appointments") or []
+    if isinstance(appts, dict):
+        appts = [appts]
+    # normalize & sort
+    rows = []
+    for a in appts:
+        if not isinstance(a, dict): 
+            continue
+        rows.append({
+            "date": a.get("date"),
+            "doctor": a.get("doctor") or a.get("provider") or "",
+            "status": a.get("status") or "",
+            "booking_id": a.get("booking_id") or "",
+        })
+    if rows:
+        rows.sort(key=lambda r: _to_epoch(r.get("date")))
+    return pd.DataFrame(rows)
+
+def _recent_activity(pid: str, k: int = 12) -> List[Dict[str, Any]]:
+    try:
+        return _mem.get_window(pid, k=k)
+    except Exception:
+        return []
+
+def _activity_icon(typ: str) -> str:
+    t = (typ or "").lower()
+    if "appoint" in t: return "📅"
+    if "note" in t: return "📝"
+    if "lab" in t: return "🧪"
+    if "image" in t or "imaging" in t: return "🩻"
+    if "plan" in t: return "🧭"
+    if "event" in t: return "📌"
+    return "•"
+
+# -------------------------
+# Header + key metrics
+# -------------------------
+base = _get_base(pid)
+name = base.get("name", pid)
+st.markdown(f"### {name}  <span class='small-muted'>({pid})</span>", unsafe_allow_html=True)
+
+summary = _mem.get_summary(pid)  # concise line with conditions/last appt/recent
+with st.container():
+    st.markdown(f"<div class='card'><div class='subtitle'>Summary</div>{summary}</div>", unsafe_allow_html=True)
+
+# Metrics
+age = base.get("age", "—")
+conditions = base.get("conditions") or []
+appts = base.get("appointments") or []
+if isinstance(appts, dict):
+    appts = [appts]
+upcoming = _next_upcoming(appts)
+upc_text = f"{upcoming.get('date')} — {upcoming.get('doctor','')}" if upcoming else "—"
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Age", age if age is not None else "—")
+m2.metric("Conditions", len(conditions))
+m3.metric("Last/Upcoming Appt", upc_text)
+m4.metric("Notes (recent)", len([e for e in _recent_activity(pid, k=20) if (e.get('type') or '').lower() in {'note','event'}]))
+
+st.markdown("---")
+
+# -------------------------
+# Two columns: Plan + Appointments / Activity
+# -------------------------
+left, right = st.columns([1, 1])
+
+with left:
+    # Latest Plan
+    st.markdown("#### Latest Plan")
+    steps = _find_latest_plan(pid)
+    if steps:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        for i, s in enumerate(steps, 1):
+            st.markdown(f"- {s}")
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.info("No plan recorded yet.")
+
+    # Upcoming Appointments
+    st.markdown("#### Upcoming Appointments")
+    df_appts = _appointments_df(base)
+    if not df_appts.empty:
+        # mark upcoming (>= today)
+        today = date.today().isoformat()
+        df_show = df_appts.copy()
+        df_show["is_upcoming"] = df_show["date"].fillna("").apply(lambda d: (d >= today))
+        # Show upcoming first
+        df_show = pd.concat([df_show[df_show["is_upcoming"]], df_show[~df_show["is_upcoming"]]], ignore_index=True)
+        st.dataframe(df_show.drop(columns=["is_upcoming"]), use_container_width=True, height=220)
+    else:
+        st.info("No appointments on file.")
+
+with right:
+    # Recent Activity (timeline)
+    st.markdown("#### Recent Activity")
+    try:
+        window = _recent_activity(pid, k=12)
+        if not window:
+            st.info("No recent activity.")
         else:
-            st.info("Record updated locally (DB may be read-only in this environment).")
-    except Exception as e:
-        st.error(f"Failed to save note: {e}")
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            for e in window:
+                typ = e.get("type") or e.get("tag") or "event"
+                icon = _activity_icon(typ)
+                ts = e.get("ts") or e.get("date") or e.get("timestamp") or ""
+                txt = e.get("text") or e.get("notes") or e.get("diagnosis") or ""
+                # compact line
+                st.markdown(
+                    f"<div class='timeline-item'><span class='small-muted'>{ts}</span> &nbsp; {icon} "
+                    f"<span class='kv'><b>{typ.capitalize()}</b></span> — {txt}</div>",
+                    unsafe_allow_html=True
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
+    except Exception as ex:
+        st.error(f"Could not load recent activity: {ex}")
+
+st.markdown("---")
+
+# -------------------------
+# Full History (filterable)
+# -------------------------
+st.markdown("### Full History")
+flt_col1, flt_col2 = st.columns([2,1])
+with flt_col1:
+    q = st.text_input("Filter (matches in text/notes/diagnosis)", value="")
+with flt_col2:
+    k = st.slider("Window size", min_value=10, max_value=200, value=50, step=10)
+
+rows: List[Dict[str, Any]] = []
+for e in _mem.get_window(pid, k=k):
+    rows.append({
+        "ts": e.get("ts") or e.get("date") or e.get("timestamp"),
+        "type": e.get("type") or e.get("tag") or "event",
+        "text": e.get("text") or e.get("notes") or e.get("diagnosis") or "",
+        "meta": json.dumps(e.get("meta") or {}, ensure_ascii=False),
+    })
+df_hist = pd.DataFrame(rows)
+if q.strip():
+    ql = q.lower()
+    mask = df_hist["text"].astype(str).str.lower().str.contains(ql) | \
+           df_hist["meta"].astype(str).str.lower().str.contains(ql)
+    df_hist = df_hist[mask]
+st.dataframe(df_hist, use_container_width=True, height=320)
+
+# -------------------------
+# Add Clinical Note (persists to memory)
+# -------------------------
+st.markdown("### Add Clinical Note")
+with st.form("add_note_form", clear_on_submit=True):
+    note = st.text_area("Note (stored in runtime memory log)", height=120, placeholder="e.g., Discussed BP home-monitoring; schedule BMP labs next visit.")
+    submitted = st.form_submit_button("Save note")
+    if submitted:
+        if not note.strip():
+            st.warning("Please enter a note.")
+        else:
+            _mem.record_event(pid, note.strip(), meta={"kind": "note", "by": "clinician"})
+            st.success("Note saved to memory.")
+            st.rerun()
