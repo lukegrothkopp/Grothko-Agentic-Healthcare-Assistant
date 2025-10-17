@@ -7,19 +7,21 @@ import glob
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 
 DEFAULT_SEED_DIR = "data/patient_seeds"
-EXTRA_SEED_DIR = "data/patient_memory"          # ← new: your extra seed directory
+EXTRA_SEED_DIR = "data/patient_memory"          # extra seed dir used in your project
 DEFAULT_DB_PATH = Path("data/patient_db.json")
 DEFAULT_DB_GLOB = "data/patient_db/*.json"
 
 MEMORY_LOG_DIR = Path("data/memory")
 MEMORY_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+
 def _now_iso() -> str:
     # Naive ISO is fine; we normalize to UTC epoch when sorting
     return datetime.now().isoformat(timespec="seconds")
+
 
 def _to_epoch(ts) -> float:
     """
@@ -42,10 +44,72 @@ def _to_epoch(ts) -> float:
         pass
     return float("-inf")
 
+
+def _coerce_int(x: Any) -> Optional[int]:
+    try:
+        if isinstance(x, bool):
+            return None
+        if isinstance(x, (int,)):
+            return int(x)
+        if isinstance(x, float):
+            return int(x)
+        if isinstance(x, str) and x.strip():
+            return int(float(x.strip()))
+    except Exception:
+        return None
+    return None
+
+
+def _parse_dob_to_age(dob_str: str) -> Optional[int]:
+    """Support YYYY-MM-DD and MM/DD/YYYY. Returns age in years."""
+    if not isinstance(dob_str, str) or not dob_str.strip():
+        return None
+    s = dob_str.strip()
+    fmt_candidates = ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"]
+    for fmt in fmt_candidates:
+        try:
+            dt = datetime.strptime(s, fmt).date()
+            today = date.today()
+            age = today.year - dt.year - ((today.month, today.day) < (dt.month, dt.day))
+            return age if age >= 0 and age < 140 else None
+        except Exception:
+            continue
+    return None
+
+
+def _normalize_conditions(raw: Any) -> List[str]:
+    """
+    Accepts:
+      - list[str]
+      - list[dict] with keys like 'name'/'condition'/'dx'
+      - comma/semicolon separated string
+    Returns: list[str]
+    """
+    out: List[str] = []
+    if raw is None:
+        return out
+    if isinstance(raw, list):
+        for it in raw:
+            if isinstance(it, str):
+                s = it.strip()
+                if s:
+                    out.append(s)
+            elif isinstance(it, dict):
+                val = it.get("name") or it.get("condition") or it.get("dx") or it.get("value")
+                if isinstance(val, str) and val.strip():
+                    out.append(val.strip())
+    elif isinstance(raw, str):
+        # split by comma/semicolon
+        parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+        out.extend(parts)
+    return out
+
+
 @dataclass
 class _Patient:
     patient_id: str
     data: Dict[str, Any]
+
 
 class PatientMemory:
     """
@@ -208,44 +272,83 @@ class PatientMemory:
             self._ingest_patient_record(rec)
 
     def _ingest_patient_record(self, rec: Dict[str, Any]) -> None:
-        """Normalize and store a patient record (maps profile.full_name & entries)."""
+        """
+        Normalize and store a patient record.
+
+        Adds:
+          - name from profile.full_name if missing
+          - age from age/profile.age/demographics.age or derived from dob/date_of_birth/profile.dob/demographics.dob
+          - conditions normalized from various shapes
+          - entries[] folded into history[]
+        """
         if not isinstance(rec, dict):
             return
 
-        # NEW: normalize name from profile.full_name when 'name' missing
+        # 1) Name normalization from profile.full_name
         if "name" not in rec and isinstance(rec.get("profile"), dict):
             fn = rec["profile"].get("full_name")
             if isinstance(fn, str) and fn.strip():
                 rec["name"] = fn.strip()
 
-        # Choose/generate patient_id
+        # 2) Determine patient_id (fall back to name-derived)
         pid = rec.get("patient_id") or rec.get("id") or rec.get("pid")
         if not pid:
             name_for_id = (rec.get("name") or rec.get("profile", {}).get("full_name") or "patient")
             pid = name_for_id.lower().replace(" ", "_")
 
-        # Store as dataclass-backed entry
+        # 3) Age normalization
+        age_val = rec.get("age")
+        if age_val is None:
+            # fallback to profile/demographics
+            prof = rec.get("profile") or {}
+            demo = rec.get("demographics") or {}
+            age_val = prof.get("age", demo.get("age"))
+        age_int = _coerce_int(age_val)
+
+        if age_int is None:
+            # derive from DOB if possible
+            dob = rec.get("dob") or rec.get("date_of_birth")
+            if not dob and isinstance(rec.get("profile"), dict):
+                dob = rec["profile"].get("dob")
+            if not dob and isinstance(rec.get("demographics"), dict):
+                dob = rec["demographics"].get("dob")
+            if isinstance(dob, str):
+                age_int = _parse_dob_to_age(dob)
+
+        if age_int is not None:
+            rec["age"] = age_int  # store normalized age for downstream UI
+
+        # 4) Conditions normalization
+        conds = rec.get("conditions")
+        if conds is None:
+            # alternate keys sometimes used
+            conds = rec.get("diagnoses") or rec.get("problems") or rec.get("dx")
+            if conds is None and isinstance(rec.get("profile"), dict):
+                conds = rec["profile"].get("conditions")
+            if conds is None and isinstance(rec.get("demographics"), dict):
+                conds = rec["demographics"].get("conditions")
+        rec["conditions"] = _normalize_conditions(conds)
+
+        # Persist the patient (dataclass wrapper)
         self.patients[pid] = _Patient(patient_id=pid, data=rec)
 
-        # Normalize embedded history + appointments + entries as events with timestamps
+        # 5) Normalize embedded history + appointments + entries as events with timestamps
         def _ensure_ts(x):
             if isinstance(x, dict) and not x.get("ts"):
                 x["ts"] = x.get("date") or x.get("timestamp") or _now_iso()
             return x
 
-        # Existing support
         hist = rec.get("history") or []
         if isinstance(hist, dict):
             hist = [hist]
         hist = [_ensure_ts(h) for h in hist if isinstance(h, dict)]
 
-        # NEW: map entries → history
+        # entries → history (your custom schema)
         entries = rec.get("entries") or []
         if isinstance(entries, dict):
             entries = [entries]
         entries = [_ensure_ts(e) for e in entries if isinstance(e, dict)]
 
-        # Existing support
         appts = rec.get("appointments") or []
         if isinstance(appts, dict):
             appts = [appts]
@@ -253,7 +356,7 @@ class PatientMemory:
 
         merged = []
         if hist:     merged.extend(hist)
-        if entries:  merged.extend(entries)   # ← include custom entries
+        if entries:  merged.extend(entries)
         if appts:    merged.extend(appts)
 
         if merged:
@@ -354,6 +457,18 @@ class PatientMemory:
         if not base:
             return ""
         name = base.get("name", patient_id)
+        # ensure age present if we can derive it now
+        if base.get("age") is None:
+            # try to derive from any known DOB aliases
+            dob = base.get("dob") or base.get("date_of_birth")
+            if not dob and isinstance(base.get("profile"), dict):
+                dob = base["profile"].get("dob")
+            if not dob and isinstance(base.get("demographics"), dict):
+                dob = base["demographics"].get("dob")
+            if isinstance(dob, str):
+                age_int = _parse_dob_to_age(dob)
+                if age_int is not None:
+                    base["age"] = age_int
         age = base.get("age")
         conds = base.get("conditions") or []
 
@@ -395,12 +510,23 @@ class PatientMemory:
         rows: List[Dict[str, Any]] = []
         for pid, p in self.patients.items():
             base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
+            # ensure normalized fields
+            name = base.get("name", pid)
+            age = base.get("age")
+            if age is None:
+                dob = base.get("dob") or base.get("date_of_birth")
+                if not dob and isinstance(base.get("profile"), dict):
+                    dob = base["profile"].get("dob")
+                if not dob and isinstance(base.get("demographics"), dict):
+                    dob = base["demographics"].get("dob")
+                if isinstance(dob, str):
+                    age = _parse_dob_to_age(dob)
+            conds = base.get("conditions") or []
             rows.append({
                 "patient_id": pid,
-                "name": base.get("name", pid),
-                "age": base.get("age"),
-                "conditions": ", ".join(map(str, base.get("conditions") or [])),
+                "name": name,
+                "age": age,
+                "conditions": ", ".join(map(str, conds)),
             })
         rows.sort(key=lambda r: (str(r.get("name") or ""), str(r.get("patient_id") or "")))
         return rows
-
