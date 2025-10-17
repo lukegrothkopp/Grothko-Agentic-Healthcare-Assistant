@@ -43,6 +43,30 @@ booking_tool = st.session_state.booking_tool
 # -------------------------------
 # Helpers (define BEFORE any use)
 # -------------------------------
+
+def _get_patient_record(mem_obj: PatientMemory, pid: str) -> dict:
+    """Return a plain dict record for a patient_id or {} if missing."""
+    # Try a .get method if your PatientMemory happens to have one
+    try:
+        if hasattr(mem_obj, "get") and callable(getattr(mem_obj, "get")):
+            rec = mem_obj.get(pid)
+            if isinstance(rec, dict):
+                return rec
+    except Exception:
+        pass
+    # Fallback to mem.patients
+    try:
+        p = (mem_obj.patients or {}).get(pid)
+        if p is None:
+            return {}
+        return p.data if hasattr(p, "data") else (p if isinstance(p, dict) else {})
+    except Exception:
+        return {}
+
+def _get_full_name(mem_obj: PatientMemory, pid: str) -> str:
+    rec = _get_patient_record(mem_obj, pid)
+    return ((rec.get("profile") or {}).get("full_name")) or rec.get("name") or pid
+
 def _resolve_pid_safe(mem: PatientMemory, text: str, default_id: str) -> str:
     """Resolve a patient id from free text; never throws; falls back to default."""
     fn = getattr(mem, "resolve_from_text", None)
@@ -374,13 +398,15 @@ with tab_schedule:
             )
         elif selected_pid:
             pid = _ensure_patient_from_form(
-                mem, full_name=(mem.get(selected_pid) or {}).get("profile", {}).get("full_name") or selected_pid,
+                mem,
+                full_name=_get_full_name(mem, selected_pid),
                 dob=(dob if isinstance(dob, date) else None),
                 age_input=(age_val if age_val else None),
                 sex=(sex if sex else None),
                 phone=phone, email=email, address=address,
                 prefs=prefs, booking_meta=booking_meta, reason=reason,
             )
+
         else:
             st.error("Please select an existing patient or type a full name to create a new one.")
             st.stop()
