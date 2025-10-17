@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import json
 import glob
 from dataclasses import dataclass
@@ -49,7 +50,7 @@ def _coerce_int(x: Any) -> Optional[int]:
     try:
         if isinstance(x, bool):
             return None
-        if isinstance(x, (int,)):
+        if isinstance(x, int):
             return int(x)
         if isinstance(x, float):
             return int(x)
@@ -71,7 +72,7 @@ def _parse_dob_to_age(dob_str: str) -> Optional[int]:
             dt = datetime.strptime(s, fmt).date()
             today = date.today()
             age = today.year - dt.year - ((today.month, today.day) < (dt.month, dt.day))
-            return age if age >= 0 and age < 140 else None
+            return age if 0 <= age < 140 else None
         except Exception:
             continue
     return None
@@ -99,7 +100,6 @@ def _normalize_conditions(raw: Any) -> List[str]:
                 if isinstance(val, str) and val.strip():
                     out.append(val.strip())
     elif isinstance(raw, str):
-        # split by comma/semicolon
         parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
         out.extend(parts)
     return out
@@ -185,7 +185,6 @@ class PatientMemory:
                 for rec in data:
                     self._ingest_patient_record(rec)
             elif isinstance(data, dict):
-                # container or single record
                 if "patients" in data and isinstance(data["patients"], list):
                     for rec in data["patients"]:
                         self._ingest_patient_record(rec)
@@ -299,14 +298,12 @@ class PatientMemory:
         # 3) Age normalization
         age_val = rec.get("age")
         if age_val is None:
-            # fallback to profile/demographics
             prof = rec.get("profile") or {}
             demo = rec.get("demographics") or {}
             age_val = prof.get("age", demo.get("age"))
         age_int = _coerce_int(age_val)
 
         if age_int is None:
-            # derive from DOB if possible
             dob = rec.get("dob") or rec.get("date_of_birth")
             if not dob and isinstance(rec.get("profile"), dict):
                 dob = rec["profile"].get("dob")
@@ -316,12 +313,11 @@ class PatientMemory:
                 age_int = _parse_dob_to_age(dob)
 
         if age_int is not None:
-            rec["age"] = age_int  # store normalized age for downstream UI
+            rec["age"] = age_int  # normalized age
 
         # 4) Conditions normalization
         conds = rec.get("conditions")
         if conds is None:
-            # alternate keys sometimes used
             conds = rec.get("diagnoses") or rec.get("problems") or rec.get("dx")
             if conds is None and isinstance(rec.get("profile"), dict):
                 conds = rec["profile"].get("conditions")
@@ -343,7 +339,7 @@ class PatientMemory:
             hist = [hist]
         hist = [_ensure_ts(h) for h in hist if isinstance(h, dict)]
 
-        # entries → history (your custom schema)
+        # entries → history (custom schema)
         entries = rec.get("entries") or []
         if isinstance(entries, dict):
             entries = [entries]
@@ -409,9 +405,39 @@ class PatientMemory:
             if not e.get("ts"):
                 e["ts"] = e.get("timestamp") or e.get("time") or e.get("date") or now_iso
 
-        # Sort safely by epoch seconds (floats), avoiding naive/aware datetime comparisons
         entries.sort(key=lambda e: _to_epoch(e.get("ts")))
         return list(reversed(entries[-k:]))
+
+    # -----------------------------
+    # Resolution / search / summary / directory
+    # -----------------------------
+    def resolve_from_text(self, text: str, default: Optional[str] = None) -> Optional[str]:
+        """
+        Best-effort patient resolution from free text.
+        - Matches explicit ids like 'patient_701' or 'patient-701' or 'patient 701'
+        - Else tries to match by patient name tokens (case-insensitive substring)
+        - Falls back to `default`
+        """
+        if not isinstance(text, str) or not text.strip():
+            return default
+
+        s = text.lower()
+
+        # explicit id like patient_701 / patient-701 / patient 701
+        m = re.search(r"patient[\s_-]?(\d{3,})", s)
+        if m:
+            pid = f"patient_{m.group(1)}"
+            if pid in self.patients:
+                return pid
+
+        # name-based: simple substring match against known names
+        for pid, pobj in self.patients.items():
+            base = pobj.data if hasattr(pobj, "data") and isinstance(pobj.data, dict) else (pobj if isinstance(pobj, dict) else {})
+            nm = base.get("name") or (base.get("profile") or {}).get("full_name") or pid
+            if isinstance(nm, str) and nm.strip() and nm.lower() in s:
+                return pid
+
+        return default
 
     def search(self, patient_id: str, query: str, k: int = 3) -> List[str]:
         """Simple keyword search over recent memory texts + seed history notes."""
@@ -459,7 +485,6 @@ class PatientMemory:
         name = base.get("name", patient_id)
         # ensure age present if we can derive it now
         if base.get("age") is None:
-            # try to derive from any known DOB aliases
             dob = base.get("dob") or base.get("date_of_birth")
             if not dob and isinstance(base.get("profile"), dict):
                 dob = base["profile"].get("dob")
