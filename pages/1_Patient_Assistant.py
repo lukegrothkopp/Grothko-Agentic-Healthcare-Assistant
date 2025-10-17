@@ -267,7 +267,7 @@ if _ask_send and _ask_text and _ask_text.strip():
 # Tab: Quick Schedule
 # ================
 with tab_schedule:
-    st.subheader("Book an appointment (simple form)")
+    st.subheader("Book an appointment")
 
     # Find or add a patient
     st.markdown("**Find or add a patient**")
@@ -284,7 +284,7 @@ with tab_schedule:
         options = ([placeholder_option] + pretty_labels) if pretty_labels else [no_patients_option]
 
         sel_label = st.selectbox(
-            "Existing patient (optional)",
+            "Existing Patients",
             options=options,
             index=0,
             disabled=(not pretty_labels),
@@ -295,7 +295,7 @@ with tab_schedule:
             selected_pid = patients[pretty_labels.index(sel_label)]["patient_id"]
 
     with cB:
-        full_name = st.text_input("Full name (type to add or match)", value="", key="sched_fullname")
+        full_name = st.text_input("New Patient - Full Name)", value="", key="sched_fullname")
 
     # Optional demographics
     c1, c2, c3 = st.columns([1, 1, 1])
@@ -312,17 +312,17 @@ with tab_schedule:
                 format="YYYY-MM-DD",
             )
     with c2:
-        age_input = st.number_input("Age (optional)", min_value=0, max_value=120, value=0, step=1, key="sched_age")
+        age_input = st.number_input("Age)", min_value=0, max_value=120, value=0, step=1, key="sched_age")
         age_val = int(age_input) if age_input else None
     with c3:
-        sex = st.selectbox("Sex (optional)", options=["", "male", "female", "other"], index=0, key="sched_sex")
+        sex = st.selectbox("Sex", options=["", "male", "female", "other"], index=0, key="sched_sex")
 
     c4, c5 = st.columns([1, 1])
     with c4:
-        phone = st.text_input("Phone (optional)", value="", key="sched_phone")
+        phone = st.text_input("Phone", value="", key="sched_phone")
     with c5:
-        email = st.text_input("Email (optional)", value="", key="sched_email")
-    address = st.text_input("Address (optional)", value="", key="sched_address")
+        email = st.text_input("Email", value="", key="sched_email")
+    address = st.text_input("Address", value="", key="sched_address")
 
     st.markdown("---")
 
