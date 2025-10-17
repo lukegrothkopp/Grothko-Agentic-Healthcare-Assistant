@@ -1,380 +1,179 @@
-import os, json, re, datetime
-from datetime import date, timedelta
-from typing import TypedDict, List, Optional
+# agents/graph_agent.py
+from __future__ import annotations
 
-from langgraph.graph import StateGraph, END
-from langchain.tools import Tool
+from typing import List, Optional, TypedDict, Any
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, END
 
-from tools.search_tool import get_medical_search_tool
-from tools.record_tool import get_record_tools
-from tools.booking_tool import get_booking_tool
-from tools.offline_kb_tool import get_offline_kb_tool
 from utils.rag_pipeline import RAGPipeline
-from utils.patient_memory import PatientMemory
-from utils.metrics import log_plan, log_result, log_tool, inc_counter
 
-from prompts.prompt_templates import (
-    SAFETY_CORE, MEMORY_STUB, PLAN_TEMPLATE, SEARCH_SUMMARY_TEMPLATE,
-    BOOKING_EXTRACT_TEMPLATE, RECORDS_ACTION_TEMPLATE
-)
-
-from pydantic import BaseModel, Field
-
-class AgentState(TypedDict):
-    messages: List
+# --------------------------
+# State
+# --------------------------
+class AgentState(TypedDict, total=False):
+    messages: List[Any]             # LangChain messages or dicts with "content"
     intent: Optional[str]
     result: Optional[str]
     patient_id: Optional[str]
-    plan: Optional[List[str]]
+    plan: Optional[List[str]]       # optional, plan steps
+    bullets: Optional[List[str]]    # optional, info bullets
 
-_MEM_SINGLETON: Optional[PatientMemory] = None
-def _mem() -> PatientMemory:
-    global _MEM_SINGLETON
-    if _MEM_SINGLETON is None:
-        _MEM_SINGLETON = PatientMemory()
-    return _MEM_SINGLETON
+# --------------------------
+# Helpers
+# --------------------------
+def _msg_text(m: Any) -> str:
+    if hasattr(m, "content"):
+        return getattr(m, "content") or ""
+    if isinstance(m, dict):
+        return str(m.get("content", "") or "")
+    return str(m or "")
 
-def memory_context_provider(patient_id: Optional[str], user_query: str, k: int = 3):
-    summary = _mem().get_summary(patient_id) if patient_id else ""
-    recalls = _mem().search(patient_id, user_query or "", k=k) if patient_id else []
-    pre_text = MEMORY_STUB.format(
-        summary=summary or "(none)",
-        recalls="\n".join(f"- {r}" for r in (recalls or [])) or "(none)"
-    ).strip()
-    return summary, recalls, pre_text
+def _ensure_final_ai(state: AgentState, text: str) -> AgentState:
+    msgs = list(state.get("messages") or [])
+    msgs.append(AIMessage(content=text))
+    state["messages"] = msgs
+    return state
 
-def _classify_intent(text: str) -> str:
-    t = (text or "").lower()
-    if any(w in t for w in ["book", "schedule", "appointment"]): return "booking"
-    if any(w in t for w in ["record", "history", "ehr", "note"]): return "records"
-    if any(w in t for w in ["kb", "knowledge base", "rag", "offline"]): return "rag"
-    if any(w in t for w in ["info", "guideline", "treatment", "what is", "symptom", "disease", "condition"]): return "search"
-    return "search"
+def _compose_fallback(state: AgentState) -> str:
+    if state.get("result"):
+        return str(state["result"])
 
-DATE_PAT = re.compile(r"(20\d{2}-\d{2}-\d{2})|((?:\d{1,2})/(?:\d{1,2})/(?:20\d{2}))", re.I)
-WEEKDAYS = {"monday":0,"tuesday":1,"wednesday":2,"thursday":3,"friday":4,"saturday":5,"sunday":6}
+    if state.get("bullets"):
+        bl = [f"- {b}" for b in state["bullets"] if b]
+        if bl:
+            return "Here’s what I found:\n" + "\n".join(bl[:8])
 
-def _next_weekday(target_idx: int, today: date) -> date:
-    days_ahead = (target_idx - today.weekday() + 7) % 7
-    if days_ahead == 0: days_ahead = 7
-    return today + timedelta(days=days_ahead)
+    if state.get("plan"):
+        steps = [s for s in state["plan"] if s]
+        if steps:
+            return "Here’s a plan I can follow:\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))
 
-def _parse_relative_date_phrase(text: str, today: Optional[date] = None) -> Optional[str]:
-    if not text: return None
-    t = text.lower().strip()
-    today = today or date.today()
-    if "today" in t: return today.isoformat()
-    if "tomorrow" in t: return (today + timedelta(days=1)).isoformat()
-    m = re.search(r"next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", t)
-    if m: return _next_weekday(WEEKDAYS[m.group(1)], today).isoformat()
-    m2 = re.search(r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", t)
-    if m2:
-        wd = WEEKDAYS[m2.group(1)]
-        days_ahead = (wd - today.weekday() + 7) % 7
-        if days_ahead == 0: days_ahead = 7
-        return (today + timedelta(days=days_ahead)).isoformat()
-    return None
+    # mirror last user message if available
+    user_text = ""
+    for m in reversed(state.get("messages") or []):
+        # HumanMessage or dict role=user
+        if isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("role") == "user"):
+            user_text = _msg_text(m)
+            break
+    base = "I’m here to help."
+    if user_text:
+        return f"{base} You said: “{user_text}”. I can summarize options, suggest next steps, or help book an appointment."
+    return f"{base} I can summarize options, suggest next steps, or help book an appointment."
 
-def _extract_date(text: str) -> Optional[str]:
-    m = DATE_PAT.search(text or "")
-    if m:
-        d = m.group(0)
-        if "/" in d:
-            mm, dd, yyyy = d.split("/")
-            return f"{yyyy}-{int(mm):02d}-{int(dd):02d}"
-        return d
-    return _parse_relative_date_phrase(text)
+# --------------------------
+# Nodes
+# --------------------------
+def start_node(state: AgentState) -> AgentState:
+    # Optionally inject a tiny system primer; keep it short to avoid token bloat.
+    pid = state.get("patient_id") or "unknown"
+    primer = SystemMessage(
+        content=f"You are assisting patient_id={pid}. Provide high-level guidance only (no medical advice)."
+    )
+    msgs = list(state.get("messages") or [])
+    # Only insert once
+    if not msgs or not isinstance(msgs[0], SystemMessage):
+        msgs.insert(0, primer)
+    state["messages"] = msgs
+    return state
 
-def _extract_doctor(text: str) -> Optional[str]:
-    m = re.search(r"Dr\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", text or "")
-    if m: return m.group(1)
-    t = (text or "").lower()
-    if "hypertension" in t: return "Hypertension Specialist (Cardiologist)"
-    if "kidney" in t or "nephro" in t: return "Nephrologist"
-    if any(x in t for x in ["foot","ankle"]): return "Podiatrist"
-    return "Primary Care"
+def classify_node(state: AgentState) -> AgentState:
+    text = ""
+    for m in reversed(state.get("messages") or []):
+        if isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("role") == "user"):
+            text = _msg_text(m).lower()
+            break
+    intent = "info"
+    if any(w in text for w in ("book", "appointment", "schedule")):
+        intent = "book"
+    elif any(w in text for w in ("history", "records", "what happened")):
+        intent = "history"
+    state["intent"] = intent
+    return state
 
-def _make_booking_payload(user_text: str, fallback_pid: Optional[str]) -> str:
-    pid = None
-    m = re.search(r"patient[_\s-]?(\d{3,})", user_text or "", re.I)
-    if m: pid = f"patient_{m.group(1)}"
-    pid = pid or fallback_pid
-    date_iso = _extract_date(user_text) or (date.today() + timedelta(days=7)).isoformat()
-    doc = _extract_doctor(user_text) or "Primary Care"
-    payload = {"patient_id": pid, "doctor_name": doc, "appointment_date": date_iso}
-    return json.dumps(payload)
+def plan_node(state: AgentState) -> AgentState:
+    intent = (state.get("intent") or "info").lower()
+    plan: List[str] = []
+    if intent == "info":
+        plan = [
+            "Retrieve trusted information from the medical KB",
+            "Extract concise, patient-friendly bullets with sources",
+            "Offer next administrative steps (e.g., booking, questions for clinician)",
+        ]
+    elif intent == "book":
+        plan = [
+            "Parse patient id, doctor/specialty, and date (supports words like ‘tomorrow’, ‘next Monday’)",
+            "Create an appointment record if parsed successfully",
+            "Confirm to the patient and log to their memory",
+        ]
+    else:
+        plan = ["Answer clearly and log to memory"]
+    state["plan"] = plan
+    return state
 
-class PlanOut(BaseModel):
-    steps: List[str] = Field(..., description="Ordered list of minimal steps")
+def info_node(state: AgentState) -> AgentState:
+    try:
+        rag = RAGPipeline()
+        query = ""
+        for m in reversed(state.get("messages") or []):
+            if isinstance(m, HumanMessage) or (isinstance(m, dict) and m.get("role") == "user"):
+                query = _msg_text(m)
+                break
+        pairs = rag.retrieve(query, k=4) or []  # List[Tuple[text, score]] or similar
+        bullets: List[str] = []
+        for txt, _score in pairs:
+            if not txt:
+                continue
+            snippet = txt.strip().replace("\n", " ").strip()
+            if snippet:
+                bullets.append(snippet[:320])
+        state["bullets"] = bullets
+        if bullets:
+            state["result"] = "\n".join(f"- {b}" for b in bullets[:5])
+    except Exception:
+        pass
+    return state
 
+def book_node(state: AgentState) -> AgentState:
+    # Booking is usually handled by your Streamlit UI + booking tool.
+    # If you implement booking here, set state["result"] with the confirmation text.
+    return state
+
+def finalize_node(state: AgentState) -> AgentState:
+    # If the last message is already assistant text, keep it; otherwise synthesize a safe reply.
+    msgs = state.get("messages") or []
+    if msgs:
+        last = msgs[-1]
+        if isinstance(last, AIMessage) or (isinstance(last, dict) and last.get("role") == "assistant"):
+            content = _msg_text(last)
+            if content and content.strip():
+                return state
+    reply = _compose_fallback(state)
+    return _ensure_final_ai(state, reply)
+
+# --------------------------
+# Graph
+# --------------------------
 def build_graph(model_name: str = "gpt-4o-mini"):
-    key = os.getenv("OPENAI_API_KEY", "").strip()
-    has_key = key.startswith("sk-")
-    llm = ChatOpenAI(model=model_name, temperature=0.1, api_key=key) if has_key else None
+    graph = StateGraph(AgentState)
 
-    planner = None
-    if llm:
-        try:
-            planner = llm.with_structured_output(PlanOut)
-        except Exception:
-            planner = None
-
-    tools: List[Tool] = []
-    try:
-        t = get_medical_search_tool()
-        if t: tools.append(t)
-    except Exception:
-        pass
-    try:
-        tools.extend(get_record_tools())
-    except Exception:
-        pass
-    try:
-        tools.append(get_booking_tool())
-    except Exception:
-        pass
-    try:
-        tools.append(get_offline_kb_tool())
-    except Exception:
-        pass
-
-    rag = RAGPipeline()
-    def rag_retrieve(q: str) -> str:
-        pairs = rag.retrieve(q, k=3)
-        if not pairs: return "No local KB results."
-        return "\n".join([f"- {t[:400]}" for t, _ in pairs])
-    tools.append(Tool(name="RAG Retrieve", func=rag_retrieve,
-                      description="Retrieve top chunks from offline KB (no LLM required)."))
-
-    class _State(AgentState): ...
-    graph = StateGraph(_State)
-
-    def start(state: AgentState) -> AgentState:
-        user_text = ""
-        for m in reversed(state.get("messages", [])):
-            if isinstance(m, HumanMessage):
-                user_text = m.content
-                break
-        _, _, pre = memory_context_provider(state.get("patient_id"), user_text, k=3)
-        sys_msg = SystemMessage(content=(SAFETY_CORE + "\n\n" + pre).strip())
-        msgs = list(state.get("messages", []))
-        if not any(isinstance(m, SystemMessage) and SAFETY_CORE.splitlines()[0] in m.content for m in msgs):
-            msgs.insert(0, sys_msg)
-        state["messages"] = msgs
-        return state
-
-    def plan(state: AgentState) -> AgentState:
-        user_text = ""
-        for m in reversed(state.get("messages", [])):
-            if isinstance(m, HumanMessage):
-                user_text = m.content; break
-        steps = ["search"]
-        if planner and user_text:
-            try:
-                out = planner.invoke([
-                    SystemMessage(content=SAFETY_CORE),
-                    HumanMessage(content=PLAN_TEMPLATE + "\n\nUser: " + user_text),
-                ])
-                if out and getattr(out, "steps", None):
-                    steps = list(out.steps)
-            except Exception:
-                pass
-        state["plan"] = steps
-        log_plan(state.get("patient_id"), user_text, steps)
-        return state
-
-    def classify(state: AgentState) -> AgentState:
-        text = ""
-        for m in reversed(state.get("messages", [])):
-            if isinstance(m, HumanMessage):
-                text = m.content; break
-        state["intent"] = _classify_intent(text)
-        return state
-
-    class BookingReq(BaseModel):
-        patient_id: Optional[str] = None
-        doctor_name: Optional[str] = None
-        appointment_date: Optional[str] = None
-
-    def do_booking(state: AgentState) -> AgentState:
-        text = ""
-        for m in reversed(state.get("messages", [])):
-            if isinstance(m, HumanMessage):
-                text = m.content; break
-
-        payload_json = None
-        if llm:
-            try:
-                extractor = llm.with_structured_output(BookingReq)
-                extracted = extractor.invoke([
-                    SystemMessage(content=SAFETY_CORE),
-                    HumanMessage(content=BOOKING_EXTRACT_TEMPLATE + "\n\nText: " + text)
-                ])
-                if extracted and (extracted.patient_id or extracted.appointment_date):
-                    pid = extracted.patient_id or state.get("patient_id")
-                    doc = extracted.doctor_name or _extract_doctor(text) or "Primary Care"
-                    date_iso = extracted.appointment_date or _extract_date(text) or (date.today() + timedelta(days=7)).isoformat()
-                    payload_json = json.dumps({"patient_id": pid, "doctor_name": doc, "appointment_date": date_iso})
-            except Exception:
-                payload_json = None
-
-        if not payload_json:
-            payload_json = _make_booking_payload(text, state.get("patient_id"))
-
-        res = "Booking tool unavailable."
-        status = "failure"
-        for t in tools:
-            if t.name == "Book Appointment":
-                try:
-                    res = t.func(payload_json)
-                    status = "success" if "booked" in res.lower() else "failure"
-                except Exception as e:
-                    res = f"Booking failed: {e}"
-                    status = "failure"
-                break
-        log_tool("Book Appointment", status, {"payload": payload_json, "result": res})
-
-        pid = state.get("patient_id") or (json.loads(payload_json).get("patient_id") if payload_json else None)
-        if pid:
-            _mem().record_event(pid, f"[Booking] {res}", meta={"stage": "booking"})
-
-        state["result"] = res
-        state["messages"].append(AIMessage(content=res))
-        return state
-
-    def do_records(state: AgentState) -> AgentState:
-        text = ""
-        for m in reversed(state.get("messages", [])):
-            if isinstance(m, HumanMessage):
-                text = m.content; break
-
-        tool_name = None; input_payload = None
-        if llm:
-            try:
-                judge = llm.invoke([
-                    SystemMessage(content=SAFETY_CORE),
-                    HumanMessage(content=RECORDS_ACTION_TEMPLATE + "\n\nText: " + text)
-                ])
-                jtxt = (judge.content or "").strip().lower()
-                if "retrieve" in jtxt:
-                    tool_name = "Retrieve Medical History"
-                    input_payload = state.get("patient_id") or ""
-            except Exception:
-                pass
-
-        if tool_name is None:
-            tool_name = "Manage Medical Records"
-            pid = state.get("patient_id") or "patient_001"
-            input_payload = json.dumps({"patient_id": pid, "data": {"latest_note": text}})
-
-        res = "Records tool unavailable."
-        status = "failure"
-        for t in tools:
-            if t.name == tool_name:
-                try:
-                    res = t.func(input_payload)
-                    status = "success"
-                except Exception as e:
-                    res = f"Records tool failed: {e}"
-                    status = "failure"
-                break
-        log_tool(tool_name, status, {"input": input_payload, "result": res})
-
-        state["result"] = res
-        state["messages"].append(AIMessage(content=res))
-        return state
-
-    def do_search(state: AgentState) -> AgentState:
-        text = ""
-        for m in reversed(state.get("messages", [])):
-            if isinstance(m, HumanMessage):
-                text = m.content; break
-
-        res = None
-        tool_used = None
-        for t in tools:
-            if t.name == "Offline Medical KB" and hasattr(t, 'func'):
-                try:
-                    res = t.func(text)
-                    tool_used = "Offline Medical KB"
-                except Exception:
-                    res = None
-                break
-        if not res:
-            for t in tools:
-                if t.name == "Medical Search" and hasattr(t, 'func'):
-                    try:
-                        res = t.func(text)
-                        tool_used = "Medical Search"
-                    except Exception:
-                        res = None
-                    break
-        res = res or "No result."
-        if tool_used:
-            log_tool(tool_used, "success", {"query": text})
-
-        if llm and isinstance(res, str):
-            try:
-                res = llm.invoke([
-                    SystemMessage(content=SAFETY_CORE),
-                    HumanMessage(content=SEARCH_SUMMARY_TEMPLATE + "\n\nRaw:\n" + res)
-                ]).content
-            except Exception:
-                pass
-
-        state["result"] = res
-        state["messages"].append(AIMessage(content=res))
-        return state
-
-    def do_rag(state: AgentState) -> AgentState:
-        text = ""
-        for m in reversed(state.get("messages", [])):
-            if isinstance(m, HumanMessage):
-                text = m.content; break
-        res = "No local KB results."
-        for t in tools:
-            if t.name == "RAG Retrieve":
-                try:
-                    res = t.func(text)
-                except Exception:
-                    res = "RAG retrieve failed."
-                break
-        log_result("rag", res, {"query": text})
-        state["result"] = res
-        state["messages"].append(AIMessage(content=res))
-        return state
-
-    def finalize(state: AgentState) -> AgentState:
-        return state
-
-    def route(state: AgentState) -> str:
-        return state.get("intent") or "search"
-
-    graph.add_node("start", start)
-    graph.add_node("plan", plan)
-    graph.add_node("classify", classify)
-    graph.add_node("booking", do_booking)
-    graph.add_node("records", do_records)
-    graph.add_node("search", do_search)
-    graph.add_node("rag", do_rag)
-    graph.add_node("finalize", finalize)
+    graph.add_node("start", start_node)
+    graph.add_node("classify", classify_node)
+    graph.add_node("plan", plan_node)
+    graph.add_node("info", info_node)
+    graph.add_node("book", book_node)
+    graph.add_node("finalize", finalize_node)
 
     graph.set_entry_point("start")
-    graph.add_edge("start", "plan")
-    graph.add_edge("plan", "classify")
-    graph.add_conditional_edges("classify", route, {
-        "booking": "booking",
-        "records": "records",
-        "rag": "rag",
-        "search": "search",
-    })
-    graph.add_edge("booking", "finalize")
-    graph.add_edge("records", "finalize")
-    graph.add_edge("search", "finalize")
-    graph.add_edge("rag", "finalize")
+    graph.add_edge("start", "classify")
+    graph.add_edge("classify", "plan")
+
+    def _route(state: AgentState) -> str:
+        intent = (state.get("intent") or "").lower()
+        return "book" if intent == "book" else "info"
+
+    graph.add_conditional_edges("plan", _route, {"info": "info", "book": "book"})
+    graph.add_edge("info", "finalize")
+    graph.add_edge("book", "finalize")
     graph.add_edge("finalize", END)
 
     return graph.compile()
-
