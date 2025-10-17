@@ -43,7 +43,7 @@ CSS = """
 st.set_page_config(page_title="Clinician Console", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
 st.title("🩺 Clinician Console")
-st.caption("Read-only clinical summary derived from seeds/DB + runtime memory. Not for medical advice.")
+st.caption("Clinical summary derived from seeds/DB + runtime memory")
 
 # -------------------------
 # Session-scoped memory
