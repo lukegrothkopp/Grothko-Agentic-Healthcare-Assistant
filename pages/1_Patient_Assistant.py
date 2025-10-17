@@ -295,7 +295,7 @@ with tab_schedule:
             selected_pid = patients[pretty_labels.index(sel_label)]["patient_id"]
 
     with cB:
-        full_name = st.text_input("New Patient - Full Name)", value="", key="sched_fullname")
+        full_name = st.text_input("New Patient - Full Name", value="", key="sched_fullname")
 
     # Optional demographics
     c1, c2, c3 = st.columns([1, 1, 1])
