@@ -1,6 +1,7 @@
 import datetime, json, re, os
 from datetime import date, timedelta
 from langchain.tools import Tool
+from utils.metrics import log_tool
 from utils.database_ops import add_appointment
 
 DATE_PAT = re.compile(r"(20\d{2}-\d{2}-\d{2})|((?:\d{1,2})/(?:\d{1,2})/(?:20\d{2}))", re.I)
@@ -80,9 +81,18 @@ def book_appointment(input_str: str) -> str:
             return (f"[SANDBOX] Would book {pid} with {doc} on {d_iso} (no DB write). "
                     f"Booking ID: {booking_id}.")
         add_appointment(pid, appt)
-        return (f"Appointment for patient {pid} with Dr. {doc} on {d_iso} booked. "
+        msg = (f"Appointment for patient {pid} with Dr. {doc} on {d_iso} booked. "
                 f"Booking ID: {booking_id}.")
+        try:
+            log_tool('Book Appointment', 'success', {'patient_id': pid, 'doctor': doc, 'date': d_iso})
+        except Exception:
+            pass
+        return msg
     except Exception as e:
+        try:
+            log_tool('Book Appointment', 'failure', {'error': str(e)})
+        except Exception:
+            pass
         return f"Failed to book appointment: {e}"
 
 def get_booking_tool() -> Tool:
