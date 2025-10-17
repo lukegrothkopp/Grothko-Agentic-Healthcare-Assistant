@@ -1,11 +1,9 @@
 # pages/1_Patient_Assistant.py
 from __future__ import annotations
 
-import os
-import json
+import os, json
 import streamlit as st
 from dotenv import load_dotenv
-
 from langchain_core.messages import HumanMessage
 
 from agents.graph_agent import build_graph
@@ -26,10 +24,24 @@ st.set_page_config(page_title="Patient Assistant", layout="wide")
 st.title("🩺 Patient Assistant")
 st.caption("Demo — not medical advice. Provides high-level info and admin logistics only.")
 
-# ----- memory -----
-if "pmemory" not in st.session_state:
+# ----- memory (recreate if old instance lacks new methods) -----
+if ("pmemory" not in st.session_state) or (not hasattr(st.session_state.get("pmemory"), "resolve_from_text")):
     st.session_state.pmemory = PatientMemory()
 mem: PatientMemory = st.session_state.pmemory
+
+def resolve_pid_safe(mem: PatientMemory, text: str, default_id: str) -> str:
+    """
+    Resolve a patient id from free text; never raises.
+    Falls back to the selected patient_id (or 'session').
+    """
+    fn = getattr(mem, "resolve_from_text", None)
+    if callable(fn):
+        try:
+            val = fn(text, default=default_id)
+            return val or default_id or "session"
+        except Exception:
+            return default_id or "session"
+    return default_id or "session"
 
 # ----- graph (cache once in session) -----
 if "graph" not in st.session_state:
@@ -68,7 +80,7 @@ for m in st.session_state.messages:
 with st.form("ask_form", clear_on_submit=True):
     user_prompt = st.text_area(
         "Type your question",
-        placeholder="e.g., I need help with high blood pressure",
+        placeholder="e.g., I need help with severe headaches",
         height=100,
     )
     submitted = st.form_submit_button("Send")
@@ -79,8 +91,8 @@ if submitted and user_prompt and user_prompt.strip():
     with st.chat_message("user"):
         st.markdown(user_prompt)
 
-    # resolve patient id from text; default to selection
-    resolved_pid = mem.resolve_from_text(user_prompt, default=patient_id) or patient_id or "session"
+    # resolve patient id from text; default to sidebar selection
+    resolved_pid = resolve_pid_safe(mem, user_prompt, patient_id)
 
     # call the graph
     with st.chat_message("assistant"):
