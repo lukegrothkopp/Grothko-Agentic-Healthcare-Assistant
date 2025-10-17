@@ -18,26 +18,29 @@ from utils.patient_memory import PatientMemory, _to_epoch  # uses your updated, 
 # -------------------------
 CSS = """
 <style>
+:root {
+  --border: #374151;
+  --card-bg: #111827;
+  --muted: #9ca3af;
+  --text: #e5e7eb;
+  --chip-bg: #1f2937;
+  --chip-border: #374151;
+}
+
 .badge {
   display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px;
-  background:#F0F2F6; border:1px solid #E5E7EB; margin-right:8px;
+  background: var(--chip-bg); border:1px solid var(--chip-border); margin-right:8px; color: var(--text);
 }
 .card {
-  border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px 16px; background: #fff;
+  border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; background: var(--card-bg); color: var(--text);
 }
-.subtitle {
-  color: #6b7280; font-size: 0.9rem; margin-bottom: 8px;
-}
-.kv { color:#374151; }
-.kv b { color:#111827; }
-.timeline-item {
-  padding:8px 0; border-bottom:1px dashed #eee;
-}
+.subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 8px; }
+.kv { color: var(--text); }
+.kv b { color: #fff; }
+.timeline-item { padding:8px 0; border-bottom:1px dashed var(--border); }
 .timeline-item:last-child { border-bottom: none; }
-.small-muted { color:#6b7280; font-size:0.85rem; }
-.section-title {
-  font-weight: 600; margin-top: 4px;
-}
+.small-muted { color: var(--muted); font-size:0.85rem; }
+.section-title { font-weight: 600; margin-top: 4px; }
 </style>
 """
 st.set_page_config(page_title="Clinician Console", layout="wide")
