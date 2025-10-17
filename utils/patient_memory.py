@@ -7,27 +7,36 @@ import glob
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 DEFAULT_SEED_DIR = "data/patient_seeds"
 MEMORY_LOG_DIR = Path("data/memory")
 MEMORY_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-def _safe_parse_ts(ts) -> datetime:
-    """Parse assorted timestamp forms into datetime; fallback to datetime.min on failure."""
+def _now_iso() -> str:
+    # Naive ISO is fine; we normalize to UTC epoch when sorting
+    return datetime.now().isoformat(timespec="seconds")
+
+def _to_epoch(ts) -> float:
+    """
+    Convert assorted timestamp forms to a single sortable number (UTC epoch seconds).
+    Returns -inf on failure so bad timestamps land at the beginning.
+    """
     try:
         if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(ts)
+            return float(ts)
         if isinstance(ts, str) and ts.strip():
-            s = ts.strip().rstrip("Z")  # tolerate trailing 'Z'
-            # fromisoformat is quite tolerant of "YYYY-MM-DDTHH:MM[:SS]" formats
-            return datetime.fromisoformat(s)
+            s = ts.strip().rstrip("Z")  # tolerate trailing Z
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                # treat naive as UTC to avoid local-tz surprises
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.timestamp()
     except Exception:
         pass
-    return datetime.min
-
-def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return float("-inf")
 
 @dataclass
 class _Patient:
@@ -46,7 +55,7 @@ class PatientMemory:
         self.seed_dir: str = seed_dir or os.environ.get("OFFLINE_PATIENT_DIR", DEFAULT_SEED_DIR)
         Path(self.seed_dir).mkdir(parents=True, exist_ok=True)
 
-        self.patients: Dict[str, _Patient] = {}
+        self.patients: Dict[str, _Patient | Dict[str, Any]] = {}
         self.history: Dict[str, List[Dict[str, Any]]] = {}   # unified events (notes, bookings, etc.)
         self.sessions: Dict[str, List[Dict[str, Any]]] = {}  # optional session logs
 
@@ -73,7 +82,7 @@ class PatientMemory:
                 for rec in data:
                     self._ingest_patient_record(rec)
             elif isinstance(data, dict):
-                # one record or container
+                # container or single record
                 if "patients" in data and isinstance(data["patients"], list):
                     for rec in data["patients"]:
                         self._ingest_patient_record(rec)
@@ -101,23 +110,19 @@ class PatientMemory:
 
     def _ingest_patient_record(self, rec: Dict[str, Any]) -> None:
         """Normalize and store a patient record."""
-        pid = rec.get("patient_id")
-        if not pid:
-            # try common shapes
-            pid = rec.get("id") or rec.get("pid")
+        pid = rec.get("patient_id") or rec.get("id") or rec.get("pid")
         if not pid:
             # generate a simple deterministic ID from name if present
             name = (rec.get("name") or "patient").lower().replace(" ", "_")
             pid = f"{name}_{len(self.patients) + 1}"
 
+        # allow downstream to handle either dict or dataclass
         self.patients[pid] = _Patient(patient_id=pid, data=rec)
 
-        # If the record has embedded "history" or "appointments", index them as events
-        # Ensure they have timestamps so recent-window sort works
+        # Normalize embedded history + appointments as events with timestamps
         def _ensure_ts(x):
-            if isinstance(x, dict):
-                if not x.get("ts"):
-                    x["ts"] = x.get("date") or x.get("timestamp") or _now_iso()
+            if isinstance(x, dict) and not x.get("ts"):
+                x["ts"] = x.get("date") or x.get("timestamp") or _now_iso()
             return x
 
         hist = rec.get("history") or []
@@ -163,8 +168,8 @@ class PatientMemory:
         """
         Safe recent activity window:
         - Backfills ts when missing,
-        - Tolerates various ts formats,
-        - Always sorts by a valid key.
+        - Normalizes to UTC epoch seconds for sorting (no tz errors),
+        - Returns most-recent first.
         """
         raw = self.history.get(patient_id, []) + self.sessions.get(patient_id, [])
         entries = [e for e in raw if isinstance(e, dict)]
@@ -175,8 +180,8 @@ class PatientMemory:
             if not e.get("ts"):
                 e["ts"] = e.get("timestamp") or e.get("time") or e.get("date") or now_iso
 
-        # Sort safely; unparseable timestamps drop to the beginning
-        entries.sort(key=lambda e: _safe_parse_ts(e.get("ts")))
+        # Sort safely by epoch seconds (floats), avoiding naive/aware datetime comparisons
+        entries.sort(key=lambda e: _to_epoch(e.get("ts")))
         return list(reversed(entries[-k:]))
 
     def search(self, patient_id: str, query: str, k: int = 3) -> List[str]:
@@ -206,7 +211,8 @@ class PatientMemory:
         # fall back to seed patient top-level fields (like conditions)
         p = self.patients.get(patient_id)
         if p and not hits:
-            conds = p.data.get("conditions") or []
+            base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
+            conds = base.get("conditions") or []
             for c in conds:
                 t = str(c)
                 if q in t.lower():
@@ -218,18 +224,20 @@ class PatientMemory:
     def get_summary(self, patient_id: str) -> str:
         """Compact one-paragraph summary from seed record + last activity."""
         p = self.patients.get(patient_id)
-        if not p:
+        base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
+        if not base:
             return ""
-        d = p.data
-        name = d.get("name", patient_id)
-        age = d.get("age")
-        conds = d.get("conditions") or []
+        name = base.get("name", patient_id)
+        age = base.get("age")
+        conds = base.get("conditions") or []
+
         last_appt = None
-        appts = d.get("appointments") or []
+        appts = base.get("appointments") or []
+        if isinstance(appts, dict):
+            appts = [appts]
         if appts:
-            # sort by date string, tolerate missing
             try:
-                appts_sorted = sorted(appts, key=lambda a: _safe_parse_ts(a.get("date")), reverse=True)
+                appts_sorted = sorted(appts, key=lambda a: _to_epoch(a.get("date")), reverse=True)
                 last_appt = appts_sorted[0]
             except Exception:
                 last_appt = appts[-1]
@@ -260,12 +268,12 @@ class PatientMemory:
         """Lightweight patient directory for UI select boxes."""
         rows: List[Dict[str, Any]] = []
         for pid, p in self.patients.items():
-            d = p.data
+            base = p.data if hasattr(p, "data") and isinstance(p.data, dict) else (p if isinstance(p, dict) else {})
             rows.append({
                 "patient_id": pid,
-                "name": d.get("name", pid),
-                "age": d.get("age"),
-                "conditions": ", ".join(map(str, d.get("conditions") or [])),
+                "name": base.get("name", pid),
+                "age": base.get("age"),
+                "conditions": ", ".join(map(str, base.get("conditions") or [])),
             })
         rows.sort(key=lambda r: (str(r.get("name") or ""), str(r.get("patient_id") or "")))
         return rows
