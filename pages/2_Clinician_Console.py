@@ -13,7 +13,9 @@ import json  # if not already imported
 import pandas as pd
 import streamlit as st
 
-# Local utilities
+from utils.secret_env import export_secrets_to_env
+export_secrets_to_env()  # ensures OPENAI_API_KEY etc. always available via os.environ
+
 from utils.patient_memory import PatientMemory, _to_epoch  # uses your updated, robust loader/sorter
 
 # -------------------------
