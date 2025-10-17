@@ -42,7 +42,7 @@ CSS = """
 """
 st.set_page_config(page_title="Clinician Console", layout="wide")
 st.markdown(CSS, unsafe_allow_html=True)
-st.title("🩺 Clinician Console")
+st.title("👩🏽‍⚕️ Clinician Console")
 st.caption("Clinical summary derived from seeds/DB + runtime memory")
 
 # -------------------------
