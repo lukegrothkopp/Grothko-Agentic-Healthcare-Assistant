@@ -1,9 +1,7 @@
 # agents/graph_agent.py
 from __future__ import annotations
-
 from utils.web_search import search_trusted
-from utils.summarize import llm_bullets_with_citations, have_openai
-
+from utils.summarize import llm_bullets_with_citations
 from typing import List, Optional, TypedDict, Any, Tuple
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
@@ -15,7 +13,6 @@ try:
 except Exception:  # pragma: no cover
     st = None
 from utils.patient_memory import PatientMemory
-
 
 class AgentState(TypedDict, total=False):
     messages: List[Any]
@@ -237,40 +234,47 @@ def info_node(state: AgentState) -> AgentState:
     except Exception:
         pass
 
-    # 2) If we have <3 bullets, try trusted web (Tavily/SerpAPI) + LLM summary
-    web_text = ""
-    if len(kb_bullets) < 3:
-        try:
-            docs = search_trusted(user_q, k=5)
-            if docs:
-                web_text, web_bullets = llm_bullets_with_citations(user_q, docs)
-                # If we failed to call OpenAI, web_text will still contain simple bullets+Sources
-            # else: keep kb_bullets only
-        except Exception:
-            pass
-
-    # 3) Compose unified patient-first reply
+    # Prepare top header (always prompt to book below)
     header = "You can book an appointment below in **Quick Schedule**."
     if urgent:
         header += "\nIf you feel severely unwell or unsafe, **call emergency services or go to the nearest ER.**"
 
-    body = ""
-    if web_text:
-        body = "\n\n**Trusted info (high-level):**\n" + web_text.strip()
-    else:
-        # fall back to KB bullets (if any) or topic fallbacks (from previous code)
-        if kb_bullets:
-            body = "\n\n**Trusted info (high-level):**\n" + "\n".join([f"• {b}" for b in kb_bullets[:5]])
-        else:
-            # keep the previous topic fallback behavior (ensure you still have `_topic_fallback_bullets`)
-            fb = _topic_fallback_bullets(user_q)
-            if fb:
-                body = "\n\n**Trusted info (high-level):**\n" + "\n".join([f"• {b}" for b in fb])
-            else:
-                body = "\n\nI can also pull high-level info from trusted sources; try a more specific question."
+    # 2) If KB bullets are good enough, use them
+    if len(kb_bullets) >= 3:
+        body = "\n\n**Trusted info (high-level):**\n" + "\n".join([f"• {b}" for b in kb_bullets[:7]])
+        state["bullets"] = kb_bullets
+        state["result"] = (header + body).strip()
+        return state
 
-    state["bullets"] = kb_bullets  # keep for any downstream widgets
-    state["result"] = (header + body).strip()
+    # 3) Else, pull trusted web results and build LLM bullets + guaranteed Sources links
+    bullets_md, sources_md = "", ""
+    try:
+        docs = search_trusted(user_q, k=5)
+        if docs:
+            bullets_md, sources_md = llm_bullets_with_citations(user_q, docs)
+    except Exception:
+        # ignore, we'll fall back below
+        pass
+
+    if bullets_md:
+        body = "\n\n**Trusted info (high-level):**\n" + bullets_md
+        if sources_md:
+            body += "\n\n**Sources:**\n" + sources_md
+        state["result"] = (header + body).strip()
+        state["bullets"] = kb_bullets  # keep whatever KB had for downstream widgets
+        return state
+
+    # 4) Last resort: topic fallback (ankle sprain, fever, headache, etc.) from previous code
+    fb = _topic_fallback_bullets(user_q)
+    if fb:
+        body = "\n\n**Trusted info (high-level):**\n" + "\n".join([f"• {b}" for b in fb])
+        state["result"] = (header + body).strip()
+        state["bullets"] = kb_bullets
+        return state
+
+    # 5) Very last fallback
+    state["result"] = (header + "\n\nI can also pull high-level info from trusted sources; try a more specific question.").strip()
+    state["bullets"] = kb_bullets
     return state
 
 def contact_node(state: AgentState) -> AgentState:
