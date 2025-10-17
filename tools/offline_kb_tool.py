@@ -34,6 +34,15 @@ def _offline_kb_diagnostics(_: str = "") -> str:
     return "\n".join(lines)
 
 def get_offline_kb_tool() -> Tool:
+    def _wrap_and_persist(q):
+        res = query_offline_kb(q)
+    try:
+        LAST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LAST_PATH.write_text(json.dumps({'query': q, 'result': res}, indent=2), encoding='utf-8')
+    except Exception:
+        pass
+    return res
+
     return Tool(
         name="Offline KB Query",
         func=_offline_kb_query,
@@ -41,8 +50,18 @@ def get_offline_kb_tool() -> Tool:
     )
 
 def get_offline_kb_diag_tool() -> Tool:
+    def _wrap_and_persist(q):
+        res = query_offline_kb(q)
+    try:
+        LAST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LAST_PATH.write_text(json.dumps({'query': q, 'result': res}, indent=2), encoding='utf-8')
+    except Exception:
+        pass
+    return res
+
     return Tool(
         name="Offline KB Diagnostics",
         func=_offline_kb_diagnostics,
         description="Show backend, KB dir, existence, doc count, and file-type counts."
     )
+
