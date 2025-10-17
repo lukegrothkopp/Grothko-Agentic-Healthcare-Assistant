@@ -330,7 +330,7 @@ with tab_schedule:
     dr_placeholder = "e.g., Orthopedist (Sports Medicine) or Dr. Jane Lee"
     c6, c7 = st.columns([2, 1])
     with c6:
-        doctor_name = st.text_input("Doctor or Specialty", value="", placeholder=dr_placeholder, key="sched_doc")
+        doctor_name = st.text_input("Doctor or Specialty (optional)", value="", placeholder=dr_placeholder, key="sched_doc")
     with c7:
         clinic = st.text_input("Clinic (optional)", value="", key="sched_clinic")
 
