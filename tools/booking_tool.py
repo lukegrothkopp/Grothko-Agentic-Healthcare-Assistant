@@ -2,21 +2,17 @@
 
 import datetime, json, re
 from datetime import date, timedelta
-
-from __future__ import annotations
-
-# NEW: typing names used in annotations
 from typing import Union, Mapping
 
-# NEW: robust Tool import (works across LangChain versions)
+# Robust Tool import (works across LangChain versions)
 try:
     from langchain.tools import Tool
 except Exception:
     try:
-        from langchain_core.tools import Tool
+        from langchain_core.tools import Tool  # newer split packages
     except Exception:
         # Minimal shim so the rest of the app can keep using .func, .name, .description
-        class Tool:
+        class Tool:  # type: ignore
             def __init__(self, name: str, func, description: str = ""):
                 self.name = name
                 self.func = func
