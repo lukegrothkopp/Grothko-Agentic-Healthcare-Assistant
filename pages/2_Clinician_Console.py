@@ -115,37 +115,6 @@ def _find_latest_plan(pid: str) -> Optional[List[str]]:
             return [str(s) for s in meta["plan"]]
     return None
 
-def _next_upcoming(appts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    today = date.today().isoformat()
-    # appts might be missing/strings; we normalize with _to_epoch
-    try:
-        fut = [a for a in appts if isinstance(a, dict) and str(a.get("date","")) >= "1900-01-01"]
-        fut.sort(key=lambda a: _to_epoch(a.get("date")))
-        # return first appointment from today forward
-        out = [a for a in fut if (a.get("date") or "") >= today]
-        return out[0] if out else (fut[-1] if fut else None)
-    except Exception:
-        return None
-
-def _appointments_df(base: Dict[str, Any]) -> pd.DataFrame:
-    appts = base.get("appointments") or []
-    if isinstance(appts, dict):
-        appts = [appts]
-    # normalize & sort
-    rows = []
-    for a in appts:
-        if not isinstance(a, dict): 
-            continue
-        rows.append({
-            "date": a.get("date"),
-            "doctor": a.get("doctor") or a.get("provider") or "",
-            "status": a.get("status") or "",
-            "booking_id": a.get("booking_id") or "",
-        })
-    if rows:
-        rows.sort(key=lambda r: _to_epoch(r.get("date")))
-    return pd.DataFrame(rows)
-
 def _recent_activity(pid: str, k: int = 12) -> List[Dict[str, Any]]:
     try:
         return _mem.get_window(pid, k=k)
@@ -176,10 +145,13 @@ with st.container():
 # Metrics
 age = base.get("age", "—")
 conditions = base.get("conditions") or []
-appts = base.get("appointments") or []
-if isinstance(appts, dict):
-    appts = [appts]
-upcoming = _next_upcoming(appts)
+
+# 🔁 Use PatientMemory.get_appointments for the metric so new bookings appear immediately
+try:
+    _upcoming_list = _mem.get_appointments(pid, include_past=False)
+except Exception:
+    _upcoming_list = []
+upcoming = _upcoming_list[0] if _upcoming_list else None
 upc_text = f"{upcoming.get('date')} — {upcoming.get('doctor','')}" if upcoming else "—"
 
 m1, m2, m3, m4 = st.columns(4)
@@ -207,19 +179,26 @@ with left:
     else:
         st.info("No plan recorded yet.")
 
-    # Upcoming Appointments
+    # Upcoming Appointments (🔁 THIS SECTION UPDATED TO USE PatientMemory.get_appointments)
     st.markdown("#### Upcoming Appointments")
-    df_appts = _appointments_df(base)
-    if not df_appts.empty:
-        # mark upcoming (>= today)
-        today = date.today().isoformat()
-        df_show = df_appts.copy()
-        df_show["is_upcoming"] = df_show["date"].fillna("").apply(lambda d: (d >= today))
-        # Show upcoming first
-        df_show = pd.concat([df_show[df_show["is_upcoming"]], df_show[~df_show["is_upcoming"]]], ignore_index=True)
-        st.dataframe(df_show.drop(columns=["is_upcoming"]), use_container_width=True, height=220)
+    # assuming _mem is your PatientMemory
+    appts = _mem.get_appointments(pid, include_past=False)
+    if appts:
+        df = pd.DataFrame([
+            {
+                "Date": a.get("date"),
+                "Doctor/Specialty": a.get("doctor"),
+                "Status": a.get("status", "scheduled"),
+                "Clinic": a.get("clinic"),
+                "Mode(s)": ", ".join(a.get("modes") or []) if isinstance(a.get("modes"), list) else a.get("modes"),
+                "Booking ID": a.get("booking_id"),
+            }
+            for a in appts
+        ])
+        df = df.sort_values("Date", ascending=True, kind="mergesort")
+        st.dataframe(df, use_container_width=True)
     else:
-        st.info("No appointments on file.")
+        st.info("No upcoming appointments found.")
 
 with right:
     # Recent Activity (timeline)
@@ -352,9 +331,6 @@ with st.expander("Open booking panel", expanded=False):
                 st.success(result_msg)
 
                 # Best-effort extraction to log an immediate memory event for the current patient
-                # If the NL text targets a different patient, that patient will still get the DB update;
-                # we also log to the current patient if we can guess the date/doctor.
-                # (Optional) You can parse here similarly to booking_tool if you want perfect reflection.
                 _mem.record_event(
                     pid,
                     f"Booked appointment (NL): {nl_text}",
@@ -363,3 +339,4 @@ with st.expander("Open booking panel", expanded=False):
                 st.rerun()
             except Exception as e:
                 st.error(f"Booking failed: {e}")
+
