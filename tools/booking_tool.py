@@ -1,17 +1,54 @@
-# tools/booking_tool.py
+# tools/booking_tool.py  (TOP OF FILE)
 import datetime, json, re
 from datetime import date, timedelta
 from typing import Union, Mapping
 
-# IMPORTANT: use the global store helpers from patient_memory
-from utils.patient_memory import add_appointment
-
-# If your project is on LangChain >=0.2, use langchain.tools.Tool
+# LangChain Tool import (version-safe)
 try:
     from langchain.tools import Tool
 except Exception:
-    # fallback if your env still uses the old path
-    from langchain.agents import Tool
+    from langchain.agents import Tool  # legacy fallback
+
+# ⬇️ use the class, not a missing function
+from utils.patient_memory import PatientMemory, add_appointment
+
+# single shared store for this module (no Streamlit dependency)
+_PM = None
+def _pm() -> PatientMemory:
+    global _PM
+    if _PM is None:
+        _PM = PatientMemory()  # honors OFFLINE_PATIENT_DIR if set
+    return _PM
+
+def _store_add_appointment(patient_id: str, appt: dict) -> dict:
+    """Calls PatientMemory.add_appointment if present; otherwise appends to record and persists."""
+    pm = _pm()
+    if hasattr(pm, "add_appointment"):
+        return pm.add_appointment(patient_id, appt)
+
+    # Fallback path if your class doesn’t define add_appointment()
+    base = pm.get(patient_id) or {"patient_id": patient_id}
+    appts = base.get("appointments") or []
+    if isinstance(appts, dict):
+        appts = [appts]
+    appts.append(appt)
+    base["appointments"] = appts
+    pm.save_patient_json(base, pm.seed_dir)  # persist
+
+    # optional: log a timeline event if available
+    if hasattr(pm, "record_event"):
+        pm.record_event(
+            patient_id,
+            f"Booked appointment with {appt.get('doctor','(unknown)')} on {appt.get('date','(unknown)')}.",
+            meta={"kind": "appointment", **{k: v for k, v in appt.items() if k != "created_at"}}
+        )
+
+    # refresh in-memory cache (dataclass or dict)
+    try:
+        pm.patients[patient_id].data = base
+    except Exception:
+        pm.patients[patient_id] = base
+    return appt
 
 DATE_PAT = re.compile(r"(20\d{2}-\d{2}-\d{2})|((?:\d{1,2})/(?:\d{1,2})/(?:20\d{2}))", re.I)
 
