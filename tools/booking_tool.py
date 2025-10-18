@@ -167,6 +167,17 @@ def book_appointment(input_payload: Any) -> str:
                 "(e.g., 'patient_001') or provide JSON with patient_id, doctor_name, appointment_date."
             )
         booking_id = f"booking_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+        appt = {
+            "date": d_iso,
+            "doctor": doc,
+            "status": "scheduled",
+            "booking_id": booking_id,
+            "created_at": datetime.datetime.now().isoformat(timespec="seconds")
+        }
+
+        # ✅ PERSIST the appointment to the shared patient store
+        add_appointment(pid, appt)
+        
         return (
             f"Appointment for patient {pid} with Dr. {doc} on {d_iso} booked. "
             f"Booking ID: {booking_id}."
