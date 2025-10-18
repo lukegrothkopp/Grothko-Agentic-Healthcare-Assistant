@@ -44,9 +44,18 @@ booking_tool = st.session_state.booking_tool
 # Helpers (define BEFORE any use)
 # -------------------------------
 
+def _as_record(x) -> dict:
+    """Return a plain dict from a PatientMemory entry (dataclass or dict)."""
+    try:
+        if hasattr(x, "data"):
+            return x.data
+        if isinstance(x, dict):
+            return x
+    except Exception:
+        pass
+    return {}
+
 def _get_patient_record(mem_obj: PatientMemory, pid: str) -> dict:
-    """Return a plain dict record for a patient_id or {} if missing."""
-    # Try a .get method if your PatientMemory happens to have one
     try:
         if hasattr(mem_obj, "get") and callable(getattr(mem_obj, "get")):
             rec = mem_obj.get(pid)
@@ -54,14 +63,7 @@ def _get_patient_record(mem_obj: PatientMemory, pid: str) -> dict:
                 return rec
     except Exception:
         pass
-    # Fallback to mem.patients
-    try:
-        p = (mem_obj.patients or {}).get(pid)
-        if p is None:
-            return {}
-        return p.data if hasattr(p, "data") else (p if isinstance(p, dict) else {})
-    except Exception:
-        return {}
+    return _as_record((mem_obj.patients or {}).get(pid))
 
 def _get_full_name(mem_obj: PatientMemory, pid: str) -> str:
     rec = _get_patient_record(mem_obj, pid)
@@ -125,8 +127,9 @@ def _norm_name(s: str) -> str:
 
 def _find_patient_id_by_name(mem_obj: PatientMemory, full_name: str) -> str | None:
     target = _norm_name(full_name)
-    for pid, data in (mem_obj.patients or {}).items():
-        name = _norm_name(((data.get("profile") or {}).get("full_name") or ""))
+    for pid, pdata in (mem_obj.patients or {}).items():
+        rec = _as_record(pdata)
+        name = _norm_name(((rec.get("profile") or {}).get("full_name") or rec.get("name") or ""))
         if name and name == target:
             return pid
     return None
