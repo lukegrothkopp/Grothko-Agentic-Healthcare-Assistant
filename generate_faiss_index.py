@@ -1,9 +1,22 @@
-# generate faiss index
+# generate_faiss_index.py (top imports only)
 import os
 import faiss
 import numpy as np
-from langchain_openai import OpenAIEmbeddings
-from langchain.text_splitter import CharacterTextSplitter
+from pathlib import Path
+
+try:
+    from langchain_openai import OpenAIEmbeddings
+except Exception:
+    from langchain.embeddings.openai import OpenAIEmbeddings  # legacy
+
+# NEW-FIRST, LEGACY-FALLBACK for splitters
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter as TextSplitter
+except Exception:
+    try:
+        from langchain.text_splitter import CharacterTextSplitter as TextSplitter
+    except Exception:
+        TextSplitter = None
 
 def generate_index(api_key: str | None = None,
                    kb_dir: str = "data/medical_kb",
