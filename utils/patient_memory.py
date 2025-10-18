@@ -709,3 +709,81 @@ class PatientMemory:
 
         def list_appointments(patient_id: str, include_past: bool = False) -> list[dict]:
             return get_store().get_appointments(patient_id, include_past=include_past)
+
+        # ==== compatibility shims for tools & pages (append at end of file) ====
+        from typing import Optional as _Optional
+
+        _GLOBAL_PM: _Optional[PatientMemory] = None
+
+        def get_store() -> PatientMemory:
+            """
+            Global accessor so non-Streamlit modules (e.g., tools/booking_tool.py) can
+            read/write patient data without importing Streamlit session state.
+            """
+            global _GLOBAL_PM
+            if _GLOBAL_PM is None:
+                _GLOBAL_PM = PatientMemory()
+            return _GLOBAL_PM
+
+        def add_appointment(patient_id: str, appt: dict) -> dict:
+            """
+            Module-level helper imported by tools/booking_tool.py.
+            Delegates to PatientMemory.add_appointment.
+            """
+            pm = get_store()
+            if not hasattr(pm, "add_appointment"):
+                # minimal fallback if your class lacks this method:
+                base = pm.get(patient_id) or {"patient_id": patient_id}
+                appts = base.get("appointments") or []
+                if isinstance(appts, dict):
+                    appts = [appts]
+                appts.append(appt)
+                base["appointments"] = appts
+                pm.save_patient_json(base, pm.seed_dir)
+                # also log for recent activity if record_event exists
+                if hasattr(pm, "record_event"):
+                    pm.record_event(
+                        patient_id,
+                        f"Booked appointment with {appt.get('doctor','(unknown)')} on {appt.get('date','(unknown)')}.",
+                        meta={"kind": "appointment", **{k: v for k, v in appt.items() if k != "created_at"}}
+                    )
+                # refresh in-memory copy if your class keeps one
+                if hasattr(pm, "patients"):
+                    try:
+                        from dataclasses import dataclass as _dc
+                    except Exception:
+                        pass
+                    pm.patients[patient_id] = pm.patients.get(patient_id, type("X", (), {})())
+                    # try to put updated base back
+                    try:
+                        # dataclass case
+                        pm.patients[patient_id].data = base
+                    except Exception:
+                        # dict case
+                        pm.patients[patient_id] = base
+                return appt
+            # happy path: your class implements add_appointment
+            return pm.add_appointment(patient_id, appt)
+
+        def list_appointments(patient_id: str, include_past: bool = False) -> list[dict]:
+            pm = get_store()
+            if hasattr(pm, "get_appointments"):
+                return pm.get_appointments(patient_id, include_past=include_past)
+            # fallback: read from base record
+            base = pm.get(patient_id) or {}
+            appts = base.get("appointments") or []
+            if isinstance(appts, dict):
+                appts = [appts]
+            rows = [a for a in appts if isinstance(a, dict)]
+            try:
+                # try to use _to_epoch if your module has it; else naive sort
+                _epoch = globals().get("_to_epoch", lambda x: 0)
+                rows.sort(key=lambda a: _epoch(a.get("date")))
+            except Exception:
+                pass
+            if not include_past:
+                from datetime import date as _date
+                today = _date.today().isoformat()
+                rows = [a for a in rows if (a.get("date") or "") >= today]
+            return rows
+        # ==== end shims ====
