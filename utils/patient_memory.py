@@ -122,6 +122,129 @@ class PatientMemory:
     - Provides summary, retrieval, and recent-window helpers.
     """
 
+    # --- add inside PatientMemory -----------------------------------------------
+
+    def _as_record(self, pid: str) -> dict:
+        p = (self.patients or {}).get(pid)
+        if p is None:
+            return {"patient_id": pid}
+        return p.data if hasattr(p, "data") else (p if isinstance(p, dict) else {"patient_id": pid})
+
+    def _persist_record(self, pid: str, rec: dict) -> None:
+        """Write to seed dir + refresh in-memory cache."""
+        rec = dict(rec)
+        rec.setdefault("patient_id", pid)
+        # ensure appointments list exists
+        if not isinstance(rec.get("appointments"), list):
+            rec["appointments"] = list(rec.get("appointments") or [])
+        # write JSON
+        from pathlib import Path
+        Path(self.seed_dir).mkdir(parents=True, exist_ok=True)
+        out = Path(self.seed_dir) / f"{pid}.json"
+        out.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+        # refresh in-memory
+        self.patients[pid] = _Patient(patient_id=pid, data=rec)
+
+    def add_appointment(self, patient_id: str, appt: dict) -> dict:
+        """
+        Persist a booking to both the patient record (appointments list)
+        and the memory log; returns the normalized appointment dict.
+        """
+        if not patient_id:
+            raise ValueError("patient_id is required")
+        rec = self._as_record(patient_id)
+
+        # normalize fields
+        a = dict(appt or {})
+        a.setdefault("status", "scheduled")
+        a.setdefault("doctor", a.get("doctor_name") or "Primary Care")
+        a.setdefault("booking_id", a.get("booking_id"))
+        a.setdefault("created_at", _now_iso())
+        # accept either 'date' or 'appointment_date'
+        d = a.get("date") or a.get("appointment_date")
+        if isinstance(d, str) and d.strip():
+            a["date"] = d.strip()
+        elif "date" not in a:
+            a["date"] = _now_iso()
+
+        # merge into record
+        if not isinstance(rec.get("appointments"), list):
+            rec["appointments"] = []
+        rec["appointments"].append({
+            "date": a["date"],
+            "doctor": a.get("doctor"),
+            "status": a.get("status", "scheduled"),
+            "booking_id": a.get("booking_id"),
+            "clinic": a.get("clinic"),
+            "modes": a.get("modes"),
+            "preferred_time_of_day": a.get("preferred_time_of_day"),
+            "reason": a.get("reason"),
+            "created_at": a.get("created_at"),
+        })
+
+        # persist to JSON + refresh cache
+        self._persist_record(patient_id, rec)
+
+        # also write to memory log
+        row = {
+            "ts": _now_iso(),
+            "type": "appointment",
+            "text": f"Booked {a.get('doctor','(doctor)')} on {a['date']}",
+            "meta": {"appointment": a},
+        }
+        self.history.setdefault(patient_id, []).append(row)
+        log_path = MEMORY_LOG_DIR / f"{patient_id}.jsonl"
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+        except Exception:
+            pass
+
+        return a
+
+    def get_appointments(self, patient_id: str, include_past: bool = False) -> list[dict]:
+        """
+        Aggregate appointments from the patient record + memory log,
+        de-duplicate, and return sorted by date ascending. If include_past=False,
+        only future/ongoing are returned.
+        """
+        rec = self._as_record(patient_id)
+        base = list(rec.get("appointments") or [])
+        # from memory log
+        log_appts = []
+        for e in self.history.get(patient_id, []):
+            if e.get("type") == "appointment":
+                a = (e.get("meta") or {}).get("appointment")
+                if isinstance(a, dict):
+                    log_appts.append(a)
+
+        # combine + dedupe (booking_id or (doctor,date))
+        joined = []
+        seen = set()
+        for a in base + log_appts:
+            key = (a.get("booking_id") or "", a.get("doctor") or "", a.get("date") or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            joined.append(a)
+
+        # optional filter
+        if not include_past:
+            today_epoch = _to_epoch(datetime.now().isoformat())
+            tmp = []
+            for a in joined:
+                de = _to_epoch(a.get("date"))
+                if de >= today_epoch - 24*3600:  # keep today and future
+                    tmp.append(a)
+            joined = tmp
+
+        # sort by date
+        try:
+            joined.sort(key=lambda a: _to_epoch(a.get("date")))
+        except Exception:
+            pass
+        return joined
+
     def __init__(self, seed_dir: Optional[str] = None):
         self.seed_dir: str = seed_dir or os.environ.get("OFFLINE_PATIENT_DIR", DEFAULT_SEED_DIR)
         Path(self.seed_dir).mkdir(parents=True, exist_ok=True)
