@@ -1,41 +1,50 @@
-# tools/booking_tool.py  (TOP OF FILE)
+# tools/booking_tool.py  (top of file)
+
 import datetime, json, re
 from datetime import date, timedelta
-from typing import Union, Mapping
 
-# LangChain Tool import (version-safe)
+# ---- Robust Tool import (works across LangChain versions) ----
 try:
-    from langchain.tools import Tool
+    from langchain.tools import Tool  # common in many versions
 except Exception:
-    from langchain.agents import Tool  # legacy fallback
+    try:
+        from langchain_core.tools import Tool  # newer split packages
+    except Exception:
+        # Minimal shim so the rest of the app can keep using .func, .name, .description
+        class Tool:
+            def __init__(self, name: str, func, description: str = ""):
+                self.name = name
+                self.func = func
+                self.description = description
 
-# ⬇️ use the class, not a missing function
-from utils.patient_memory import PatientMemory, add_appointment
+# Use PatientMemory directly; do NOT import add_appointment from utils.patient_memory
+from utils.patient_memory import PatientMemory
 
-# single shared store for this module (no Streamlit dependency)
+# Single shared store for this module (avoid Streamlit session coupling)
 _PM = None
 def _pm() -> PatientMemory:
     global _PM
     if _PM is None:
-        _PM = PatientMemory()  # honors OFFLINE_PATIENT_DIR if set
+        _PM = PatientMemory()   # respects OFFLINE_PATIENT_DIR if set
     return _PM
 
 def _store_add_appointment(patient_id: str, appt: dict) -> dict:
-    """Calls PatientMemory.add_appointment if present; otherwise appends to record and persists."""
+    """Write appointment via PatientMemory if available; otherwise persist into patient JSON."""
     pm = _pm()
+    # Preferred path if your PatientMemory class implements add_appointment
     if hasattr(pm, "add_appointment"):
         return pm.add_appointment(patient_id, appt)
 
-    # Fallback path if your class doesn’t define add_appointment()
+    # Fallback: merge into base record and persist
     base = pm.get(patient_id) or {"patient_id": patient_id}
     appts = base.get("appointments") or []
     if isinstance(appts, dict):
         appts = [appts]
     appts.append(appt)
     base["appointments"] = appts
-    pm.save_patient_json(base, pm.seed_dir)  # persist
+    pm.save_patient_json(base, pm.seed_dir)
 
-    # optional: log a timeline event if available
+    # Optional: also log timeline
     if hasattr(pm, "record_event"):
         pm.record_event(
             patient_id,
@@ -43,7 +52,7 @@ def _store_add_appointment(patient_id: str, appt: dict) -> dict:
             meta={"kind": "appointment", **{k: v for k, v in appt.items() if k != "created_at"}}
         )
 
-    # refresh in-memory cache (dataclass or dict)
+    # Refresh in-memory cache
     try:
         pm.patients[patient_id].data = base
     except Exception:
