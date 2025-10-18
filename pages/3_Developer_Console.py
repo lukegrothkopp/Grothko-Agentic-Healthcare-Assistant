@@ -11,9 +11,17 @@ from generate_faiss_index import generate_index
 from utils.rag_pipeline import RAGPipeline
 from utils.patient_memory import PatientMemory
 
-# Optional evaluation (LLM-as-judge)
-from langchain_openai import ChatOpenAI
-from langchain.evaluation import load_evaluator
+try:
+    from langchain_openai import ChatOpenAI
+except Exception:
+    ChatOpenAI = None
+
+try:
+    from langchain.evaluation import load_evaluator
+    HAS_LC_EVAL = True
+except Exception:
+    load_evaluator = None
+    HAS_LC_EVAL = False
 
 load_dotenv()  # local .env
 
@@ -337,8 +345,8 @@ uploaded_files = st.file_uploader(
     type=["jsonl"], accept_multiple_files=True,
 )
 
-has_key = _get_openai_key().startswith("sk-")
-use_llm = st.toggle("Use LLM judge (QAEvalChain)", value=has_key)
+has_key = (st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip().startswith("sk-")
+use_llm = st.toggle("Use LLM judge (QAEvalChain)", value=(has_key and HAS_LC_EVAL))
 model_name = st.text_input("LLM model", os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
 
 if uploaded_files and st.button("Run Evaluation"):
@@ -350,7 +358,7 @@ if uploaded_files and st.button("Run Evaluation"):
 
     rows = []
     with st.spinner("Scoring…"):
-        if use_llm and has_key:
+        if use_llm and has_key and HAS_LC_EVAL and ChatOpenAI is not None:
             try:
                 llm = ChatOpenAI(model=model_name, temperature=0)
                 evaluator = load_evaluator("qa", llm=llm)
