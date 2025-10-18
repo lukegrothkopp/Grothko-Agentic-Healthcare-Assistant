@@ -3,12 +3,17 @@
 import datetime, json, re
 from datetime import date, timedelta
 
-# ---- Robust Tool import (works across LangChain versions) ----
+from __future__ import annotations
+
+# NEW: typing names used in annotations
+from typing import Union, Mapping
+
+# NEW: robust Tool import (works across LangChain versions)
 try:
-    from langchain.tools import Tool  # common in many versions
+    from langchain.tools import Tool
 except Exception:
     try:
-        from langchain_core.tools import Tool  # newer split packages
+        from langchain_core.tools import Tool
     except Exception:
         # Minimal shim so the rest of the app can keep using .func, .name, .description
         class Tool:
