@@ -1,5 +1,20 @@
+# tools/record_tool.py
 import json
-from langchain.tools import Tool
+
+# ---- Robust Tool import (works across LangChain versions) ----
+try:
+    from langchain.tools import Tool
+except Exception:
+    try:
+        from langchain_core.tools import Tool
+    except Exception:
+        # Minimal shim so the rest of the app can keep using .func, .name, .description
+        class Tool:
+            def __init__(self, name: str, func, description: str = ""):
+                self.name = name
+                self.func = func
+                self.description = description
+
 from utils.database_ops import get_patient_record, update_patient_record
 
 def add_or_update_history(input_str: str) -> str:
