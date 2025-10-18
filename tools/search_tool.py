@@ -11,7 +11,19 @@ import urllib.parse
 from typing import List, Dict, Any, Tuple, Optional
 
 import requests
-from langchain.tools import Tool
+
+# ---- Robust Tool import (works across LangChain versions) ----
+try:
+    from langchain.tools import Tool
+except Exception:
+    try:
+        from langchain_core.tools import Tool
+    except Exception:
+        class Tool:
+            def __init__(self, name: str, func, description: str = ""):
+                self.name = name
+                self.func = func
+                self.description = description
 
 TRUSTED_SITES = [
     "nih.gov",
