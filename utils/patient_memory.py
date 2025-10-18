@@ -688,3 +688,24 @@ class PatientMemory:
             })
         rows.sort(key=lambda r: (str(r.get("name") or ""), str(r.get("patient_id") or "")))
         return rows
+        
+        # --- global store helpers (so tools can write without Streamlit session) -----
+        _GLOBAL_PM = None
+
+        def get_store() -> "PatientMemory":
+            global _GLOBAL_PM
+            if _GLOBAL_PM is None:
+                # Will honor OFFLINE_PATIENT_DIR if set
+                _GLOBAL_PM = PatientMemory()
+            return _GLOBAL_PM
+
+        def set_store(pm: "PatientMemory") -> None:
+            """Optional: let Streamlit pages inject their live PatientMemory instance."""
+            global _GLOBAL_PM
+            _GLOBAL_PM = pm
+
+        def add_appointment(patient_id: str, appt: dict) -> dict:
+            return get_store().add_appointment(patient_id, appt)
+
+        def list_appointments(patient_id: str, include_past: bool = False) -> list[dict]:
+            return get_store().get_appointments(patient_id, include_past=include_past)
