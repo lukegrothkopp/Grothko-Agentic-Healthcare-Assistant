@@ -132,6 +132,16 @@ class PatientMemory:
 
         self.reload_from_dir(self.seed_dir)
 
+    def get(self, patient_id: str) -> dict | None:
+        """Compatibility: return a plain dict for patient_id (or None)."""
+        try:
+            p = (self.patients or {}).get(patient_id)
+            if p is None:
+                return None
+            return p.data if hasattr(p, "data") else (p if isinstance(p, dict) else None)
+        except Exception:
+            return None
+
     # -----------------------------
     # Seed/DB loading (merged) + logs
     # -----------------------------
