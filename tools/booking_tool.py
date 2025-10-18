@@ -172,7 +172,7 @@ def book_appointment(input_obj: Union[str, Mapping]) -> str:
         }
 
         # ✅ PERSIST the appointment to the shared patient store
-        add_appointment(pid, appt)
+        _store_add_appointment(pid, appt)
 
         return (f"Appointment for {pid} with {doc} on {d_iso} booked. "
                 f"Booking ID: {booking_id}.")
