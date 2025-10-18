@@ -1,39 +1,74 @@
+# generate_faiss_index.py
 import os
 import faiss
 import numpy as np
-from langchain_openai import OpenAIEmbeddings
-from langchain.text_splitter import CharacterTextSplitter
+from pathlib import Path
 
-def generate_index(api_key: str | None = None,
-                   kb_dir: str = "data/medical_kb",
-                   out_path: str = "vector_store/faiss_index.bin"):
-    key = (api_key or os.getenv("OPENAI_API_KEY", "")).strip()
-    if not key.startswith("sk-"):
-        raise RuntimeError("No valid OPENAI_API_KEY provided to generate_index().")
+# Embeddings (new API first, legacy fallback)
+try:
+    from langchain_openai import OpenAIEmbeddings
+except Exception:
+    from langchain.embeddings.openai import OpenAIEmbeddings  # legacy
 
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+# Text splitters (new package first, legacy fallback)
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter as TextSplitter
+except Exception:
+    try:
+        from langchain.text_splitter import CharacterTextSplitter as TextSplitter
+    except Exception:
+        TextSplitter = None
 
+from langchain.docstore.document import Document
+
+KB_DIR = Path(os.environ.get("OFFLINE_KB_DIR", "data/medical_kb"))
+OUT_PATH = Path("vector_store/faiss_index.bin")
+OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _iter_kb_texts(dir_path: Path):
+    if not dir_path.exists():
+        return []
     texts = []
-    for fn in os.listdir(kb_dir):
-        if not fn.endswith(".txt"):
+    for p in dir_path.rglob("*"):
+        if not p.is_file():
             continue
-        fp = os.path.join(kb_dir, fn)
-        with open(fp, "r", encoding="utf-8") as f:
-            raw = f.read()
-        chunks = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0).split_text(raw)
-        texts.extend(chunks)
+        if p.suffix.lower() in {".txt", ".md"}:
+            try:
+                texts.append(p.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                continue
+    return texts
 
+
+def generate_index(api_key: str | None = None) -> str:
+    """Build a FAISS index from OFFLINE_KB_DIR and save to vector_store/faiss_index.bin."""
+    if TextSplitter is None:
+        raise RuntimeError(
+            "No text splitter available. Install `langchain-text-splitters` "
+            "or use a LangChain version that exports CharacterTextSplitter."
+        )
+
+    if api_key:
+        os.environ["OPENAI_API_KEY"] = api_key
+
+    texts = _iter_kb_texts(KB_DIR)
     if not texts:
-        raise RuntimeError(f"No .txt documents found in {kb_dir}")
+        raise RuntimeError(f"No plaintext files found under {KB_DIR.resolve()}")
 
-    emb = OpenAIEmbeddings(api_key=key)
-    vecs = emb.embed_documents(texts)
-    mat = np.array(vecs, dtype=np.float32)
-    index = faiss.IndexFlatL2(mat.shape[1])
-    index.add(mat)
+    splitter = TextSplitter(chunk_size=1000, chunk_overlap=100)
+    docs = []
+    for t in texts:
+        for chunk in splitter.split_text(t):
+            docs.append(Document(page_content=chunk))
 
-    faiss.write_index(index, out_path)
-    with open(out_path + ".docs.txt", "w", encoding="utf-8") as f:
-        for t in texts:
-            f.write(t.replace("\n", " ") + "\n")
-    return out_path
+    embedder = OpenAIEmbeddings()
+    vecs = embedder.embed_documents([d.page_content for d in docs])
+
+    arr = np.array(vecs, dtype=np.float32)
+    dim = arr.shape[1]
+    index = faiss.IndexFlatL2(dim)
+    index.add(arr)
+
+    faiss.write_index(index, str(OUT_PATH))
+    return str(OUT_PATH)
