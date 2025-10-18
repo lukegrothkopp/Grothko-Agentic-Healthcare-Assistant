@@ -1,10 +1,11 @@
 # tools/booking_tool.py
 from __future__ import annotations
 
-import datetime
-import json
-import re
+from utils.patient_memory import add_appointment   # <-- use the new one
+from langchain.agents import Tool  # safer import across LangChain versions
+import datetime, json, re
 from datetime import date, timedelta
+
 from typing import Tuple, Optional, Any
 
 # --- Version-robust Tool import (with fallback shim) ---
