@@ -184,7 +184,7 @@ if "rag" not in st.session_state:
 
 rag: RAGPipeline = st.session_state.rag
 
-default_kb = os.environ.get("OFFLINE_KB_DIR", rag.kb_dir)
+default_kb = os.environ.get("OFFLINE_KB_DIR") or "data/medical_kb"
 kb_dir = st.text_input("KB directory (OFFLINE_KB_DIR)", value=default_kb, key="kb_dir_input")
 
 c1, c2, c3, c4 = st.columns(4)
