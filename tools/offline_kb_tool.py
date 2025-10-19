@@ -7,6 +7,10 @@ from utils.rag_pipeline import RAGPipeline
 
 _PIPE = RAGPipeline()
 
+import os
+
+DEFAULT_KB_DIR = os.getenv("OFFLINE_KB_DIR", "data/medical_kb")
+
 def _offline_kb_query(q: str) -> str:
     try:
         pairs: List[Tuple[str, float]] = _PIPE.retrieve(q, k=3)
