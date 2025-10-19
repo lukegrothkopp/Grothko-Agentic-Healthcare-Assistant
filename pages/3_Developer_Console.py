@@ -236,9 +236,7 @@ st.caption({
 
 st.markdown("---")
 
-# ---------------------------
-# Optional: Build FAISS index (OpenAI embeddings)
-# ---------------------------
+# --- Optional: Build FAISS index (OpenAI embeddings) ---
 st.markdown("### Optional: Build FAISS index (OpenAI embeddings)")
 if st.button("Build FAISS index now"):
     key = _get_openai_key()
@@ -247,10 +245,19 @@ if st.button("Build FAISS index now"):
     else:
         with st.spinner("Building FAISS index…"):
             try:
-                out_path = generate_index(api_key=key)
+                # 👇 pass the current KB directory explicitly
+                out_path = generate_index(api_key=key, kb_dir=kb_dir)
                 st.success(f"FAISS index built at {out_path}")
             except Exception as e:
+                # helpful debug
+                import os
+                from pathlib import Path
                 st.error(f"Failed to build: {e}")
+                st.caption({
+                    "cwd": os.getcwd(),
+                    "kb_dir_used": kb_dir,
+                    "kb_dir_exists": Path(kb_dir).exists(),
+                })
 
 st.markdown("---")
 
