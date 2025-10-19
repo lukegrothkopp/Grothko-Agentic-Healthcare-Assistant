@@ -86,7 +86,7 @@ class RAGPipeline:
         self.backend_name: str = "tfidf-python"
         self.backend_label: str = "tfidf-python"
 
-        self.kb_dir: str = kb_dir or os.getenv("OFFLINE_KB_DIR", "data/offline_kb")
+        self.kb_dir: str = kb_dir or os.getenv("OFFLINE_KB_DIR", "data/medical_kb")
         # Auto-create the KB directory so 'kb_exists' becomes True after first run.
         try:
             os.makedirs(self.kb_dir, exist_ok=True)
