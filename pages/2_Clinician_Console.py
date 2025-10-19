@@ -53,6 +53,27 @@ st.markdown(CSS, unsafe_allow_html=True)
 st.title("👩🏽‍⚕️ Clinician Console")
 st.caption("Clinical summary derived from seeds/DB + runtime memory")
 
+# ---- Access gate (Clinician) ----
+def _get_token(name: str) -> str:
+    try:
+        v = st.secrets.get(name)
+        if v:
+            return str(v).strip()
+    except Exception:
+        pass
+    return str(os.getenv(name, "")).strip()
+
+# Prefer a dedicated CLINICIAN_TOKEN; fall back to ADMIN_TOKEN if not set
+CLINICIAN_REQUIRED = _get_token("CLINICIAN_TOKEN")
+
+if CLINICIAN_REQUIRED:
+    with st.sidebar:
+        clinician_code = st.text_input("Clinician access code", type="password")
+    if (clinician_code or "").strip() != CLINICIAN_REQUIRED:
+        st.warning("Enter a valid clinician access code to view this console.")
+        st.stop()
+# ---- end access gate ----
+
 # -------------------------
 # Session-scoped memory
 # -------------------------
